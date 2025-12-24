@@ -1,0 +1,43 @@
+{
+  "appId": "com.electro.gestion",
+  "productName": "Gestio",
+  "directories": {
+    "output": "build"
+  },
+  "files": [
+    "out/**/*",
+    "dist/electron/**/*",
+    "dist/preload.js",
+    "node_modules/**/*",
+    "package.json"
+  ],
+  "extraResources": [
+    "assets/**"
+  ],
+  "asar": true,
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true
+  },
+  "win": {
+    "target": {
+      "target": "dir",
+      "arch": [
+        "x64"
+      ]
+    },
+    "icon": "assets/icon.ico",
+    "sign": false,
+    "verifyUpdateCodeSignature": false,
+    "certificateFile": null,
+    "certificatePassword": null
+  },
+  "linux": {
+    "target": "AppImage"
+  },
+  "buildDependenciesFromSource": false,
+  "nodeGypRebuild": false,
+  "npmRebuild": false,
+  "forceCodeSigning": false,
+  "afterSign": null
+}

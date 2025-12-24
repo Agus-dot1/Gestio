@@ -1,0 +1,1422 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.calendarOperations = exports.notificationOperations = exports.paymentOperations = exports.installmentOperations = exports.saleItemOperations = exports.saleOperations = exports.productOperations = exports.customerOperations = void 0;
+const database_1 = require("./database");
+const payments_1 = require("../config/payments");
+const installments_scheduler_1 = require("./installments-scheduler");
+function generateSaleNumberBase() {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const todayStart = `${year}-${month}-${day}`;
+    const db = (0, database_1.getDatabase)();
+    const todayCountStmt = db.prepare(`
+    SELECT COUNT(*) as count FROM sales 
+    WHERE date(date) = date(?)
+  `);
+    const todayCount = todayCountStmt.get(todayStart).count + 1;
+    const sequentialNumber = String(todayCount).padStart(3, '0');
+    return `${payments_1.SALE_NUMBER_PREFIX}${sequentialNumber}-${year}${month}${day}`;
+}
+function saleNumberExists(candidate) {
+    const db = (0, database_1.getDatabase)();
+    const row = db.prepare('SELECT 1 FROM sales WHERE sale_number = ?').get(candidate);
+    return !!row;
+}
+function generateUniqueSaleNumber() {
+    const base = generateSaleNumberBase();
+    if (!saleNumberExists(base))
+        return base;
+    for (let i = 0; i < 5; i++) {
+        const suffix = Math.random().toString(36).slice(2, 6).toUpperCase();
+        const candidate = `${base}-${suffix}`;
+        if (!saleNumberExists(candidate))
+            return candidate;
+    }
+    return `${payments_1.SALE_NUMBER_PREFIX}${Date.now()}`;
+}
+function ensureUniqueSaleNumber(preferred) {
+    const base = preferred || generateSaleNumberBase();
+    if (!saleNumberExists(base))
+        return base;
+    for (let i = 0; i < 5; i++) {
+        const suffix = Math.random().toString(36).slice(2, 6).toUpperCase();
+        const candidate = `${base}-${suffix}`;
+        if (!saleNumberExists(candidate))
+            return candidate;
+    }
+    return `${payments_1.SALE_NUMBER_PREFIX}${Date.now()}`;
+}
+function referenceCodeExists(candidate) {
+    const db = (0, database_1.getDatabase)();
+    const row = db.prepare('SELECT 1 FROM sales WHERE reference_code = ?').get(candidate);
+    return !!row;
+}
+function generateNumericReferenceCode(length = 8) {
+    let code = '';
+    for (let i = 0; i < length; i++) {
+        code += Math.floor(Math.random() * 10).toString();
+    }
+    return code;
+}
+function generateUniqueReferenceCode() {
+    let attempts = 0;
+    while (attempts < 10) {
+        const length = attempts < 3 ? 8 : attempts < 6 ? 9 : 12;
+        const candidate = generateNumericReferenceCode(length);
+        if (!referenceCodeExists(candidate))
+            return candidate;
+        attempts++;
+    }
+    return String(Date.now());
+}
+function ensureUniqueReferenceCode(preferred) {
+    if (preferred && !referenceCodeExists(preferred))
+        return preferred;
+    return generateUniqueReferenceCode();
+}
+function normalizeCustomer(c) {
+    return {
+        ...c,
+        is_active: c.is_active === 1 || c.is_active === true || c.is_active === undefined
+    };
+}
+exports.customerOperations = {
+    getAll: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('SELECT * FROM customers ORDER BY name');
+        const rows = stmt.all();
+        return rows.map(normalizeCustomer);
+    },
+    getPaginated: (page = 1, pageSize = 10, searchTerm = '', includeArchived = false) => {
+        const db = (0, database_1.getDatabase)();
+        const offset = (page - 1) * pageSize;
+        let whereClause = '';
+        let params = [];
+        const activeStatus = includeArchived ? 0 : 1;
+        if (searchTerm.trim()) {
+            whereClause = `WHERE 
+        is_active = ? AND (
+        dni LIKE ? OR
+        name LIKE ? OR 
+        email LIKE ? OR 
+        phone LIKE ? OR
+        secondary_phone LIKE ?)`;
+            const searchPattern = `%${searchTerm.trim()}%`;
+            params = [activeStatus, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern];
+        }
+        else {
+            whereClause = `WHERE is_active = ?`;
+            params = [activeStatus];
+        }
+        const countStmt = db.prepare(`SELECT COUNT(*) as total FROM customers ${whereClause}`);
+        const { total } = countStmt.get(...params);
+        const stmt = db.prepare(`
+      SELECT * FROM customers 
+      ${whereClause}
+      ORDER BY name 
+      LIMIT ? OFFSET ?
+    `);
+        const customers = stmt.all(...params, pageSize, offset).map(normalizeCustomer);
+        return {
+            customers,
+            total,
+            totalPages: Math.ceil(total / pageSize),
+            currentPage: page,
+            pageSize
+        };
+    },
+    search: (searchTerm, limit = 50) => {
+        const db = (0, database_1.getDatabase)();
+        if (!searchTerm.trim())
+            return [];
+        const stmt = db.prepare(`
+      SELECT * FROM customers 
+      WHERE 
+        is_active = 1 AND (
+        dni LIKE ? OR
+        name LIKE ? OR 
+        email LIKE ? OR 
+        phone LIKE ? OR
+        secondary_phone LIKE ?)
+      ORDER BY 
+        CASE 
+          WHEN dni = ? THEN 1
+          WHEN dni LIKE ? THEN 2
+          WHEN name LIKE ? THEN 3
+          WHEN email LIKE ? THEN 4
+          ELSE 5
+        END,
+        name
+      LIMIT ?
+    `);
+        const searchPattern = `%${searchTerm.trim()}%`;
+        const exactPattern = `${searchTerm.trim()}%`;
+        const exactMatch = searchTerm.trim();
+        const rows = stmt.all(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, exactMatch, exactPattern, exactPattern, exactPattern, exactPattern, limit);
+        return rows.map(normalizeCustomer);
+    },
+    getById: (id) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('SELECT * FROM customers WHERE id = ?');
+        const result = stmt.get(id);
+        if (!result) {
+            throw new Error(`Customer with id ${id} not found`);
+        }
+        return normalizeCustomer(result);
+    },
+    create: (customer) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      INSERT INTO customers (name, dni, email, phone, secondary_phone, address, notes, is_active) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+    `);
+        const result = stmt.run(customer.name, customer.dni || null, customer.email || null, customer.phone || null, customer.secondary_phone || null, customer.address || null, customer.notes || null);
+        return result.lastInsertRowid;
+    },
+    update: (id, customer) => {
+        const db = (0, database_1.getDatabase)();
+        const fields = [];
+        const values = [];
+        if (customer.name !== undefined) {
+            fields.push('name = ?');
+            values.push(customer.name);
+        }
+        if (customer.dni !== undefined) {
+            fields.push('dni = ?');
+            values.push(customer.dni);
+        }
+        if (customer.email !== undefined) {
+            fields.push('email = ?');
+            values.push(customer.email);
+        }
+        if (customer.phone !== undefined) {
+            fields.push('phone = ?');
+            values.push(customer.phone);
+        }
+        if (customer.secondary_phone !== undefined) {
+            fields.push('secondary_phone = ?');
+            values.push(customer.secondary_phone);
+        }
+        if (customer.address !== undefined) {
+            fields.push('address = ?');
+            values.push(customer.address);
+        }
+        if (customer.notes !== undefined) {
+            fields.push('notes = ?');
+            values.push(customer.notes);
+        }
+        if (customer.is_active !== undefined) {
+            fields.push('is_active = ?');
+            values.push(customer.is_active ? 1 : 0);
+        }
+        if (customer.archived_at !== undefined) {
+            fields.push('archived_at = ?');
+            values.push(customer.archived_at);
+        }
+        if (fields.length === 0)
+            return;
+        fields.push('updated_at = CURRENT_TIMESTAMP');
+        values.push(id);
+        const stmt = db.prepare(`UPDATE customers SET ${fields.join(', ')} WHERE id = ?`);
+        stmt.run(...values);
+    },
+    delete: (id) => {
+        const db = (0, database_1.getDatabase)();
+        const salesStmt = db.prepare(`
+      SELECT s.*, c.name as customer_name
+      FROM sales s
+      LEFT JOIN customers c ON s.customer_id = c.id
+      WHERE s.customer_id = ?
+      ORDER BY s.date DESC
+    `);
+        const deletedSales = salesStmt.all(id);
+        const deleteSalesStmt = db.prepare('DELETE FROM sales WHERE customer_id = ?');
+        deleteSalesStmt.run(id);
+        const stmt = db.prepare('DELETE FROM customers WHERE id = ?');
+        const result = stmt.run(id);
+        return { deletedSales };
+    },
+    archive: (id, anonymize = false) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare("UPDATE customers SET is_active = 0, archived_at = datetime('now'), updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+        stmt.run(id);
+        if (anonymize) {
+            const anon = db.prepare(`UPDATE customers SET 
+        dni = NULL,
+        email = NULL,
+        phone = NULL,
+        secondary_phone = NULL,
+        address = NULL,
+        notes = NULL,
+        updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?`);
+            anon.run(id);
+        }
+    },
+    unarchive: (id) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare("UPDATE customers SET is_active = 1, archived_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+        stmt.run(id);
+    },
+    getCount: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('SELECT COUNT(*) as count FROM customers');
+        const result = stmt.get();
+        return result.count;
+    },
+    getRecent: (limit = 5) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('SELECT * FROM customers ORDER BY created_at DESC LIMIT ?');
+        const rows = stmt.all(limit);
+        return rows.map(normalizeCustomer);
+    },
+    getMonthlyComparison: () => {
+        const db = (0, database_1.getDatabase)();
+        const currentMonthStmt = db.prepare(`
+      SELECT COUNT(*) as count FROM customers 
+      WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')
+    `);
+        const previousMonthStmt = db.prepare(`
+      SELECT COUNT(*) as count FROM customers 
+      WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now', '-1 month')
+    `);
+        const current = currentMonthStmt.get().count;
+        const previous = previousMonthStmt.get().count;
+        const change = previous === 0 ? 0 : ((current - previous) / previous) * 100;
+        return { current, previous, change };
+    },
+    deleteAll: () => {
+        const db = (0, database_1.getDatabase)();
+        try {
+            db.exec('BEGIN');
+            db.prepare('DELETE FROM sales').run();
+            db.prepare('DELETE FROM customers').run();
+            db.exec('COMMIT');
+        }
+        catch (e) {
+            try {
+                db.exec('ROLLBACK');
+            }
+            catch (_) { }
+            throw e;
+        }
+    },
+    insertFromBackup: (customer) => {
+        const db = (0, database_1.getDatabase)();
+        if (customer.id === undefined || customer.id === null) {
+            return exports.customerOperations.create({
+                name: customer.name,
+                dni: customer.dni,
+                email: customer.email,
+                phone: customer.phone,
+                secondary_phone: customer.secondary_phone,
+                address: customer.address,
+                notes: customer.notes,
+            });
+        }
+        const stmt = db.prepare(`
+      INSERT INTO customers (
+        id, name, dni, email, phone, secondary_phone, address, notes,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
+    `);
+        const result = stmt.run(customer.id, customer.name, customer.dni || null, customer.email || null, customer.phone || null, customer.secondary_phone || null, customer.address || null, customer.notes || null, customer.created_at || null, customer.updated_at || null);
+        return result.lastInsertRowid;
+    }
+};
+exports.productOperations = {
+    getAll: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('SELECT * FROM products ORDER BY name');
+        return stmt.all();
+    },
+    getPaginated: (page = 1, pageSize = 10, searchTerm = '') => {
+        const db = (0, database_1.getDatabase)();
+        const offset = (page - 1) * pageSize;
+        let whereClause = '';
+        let params = [];
+        if (searchTerm.trim()) {
+            whereClause = 'WHERE name LIKE ? OR description LIKE ? OR category LIKE ?';
+            const searchPattern = `%${searchTerm.trim()}%`;
+            params = [searchPattern, searchPattern, searchPattern];
+        }
+        const countStmt = db.prepare(`SELECT COUNT(*) as total FROM products ${whereClause}`);
+        const { total } = countStmt.get(...params);
+        const stmt = db.prepare(`
+      SELECT * FROM products 
+      ${whereClause}
+      ORDER BY name 
+      LIMIT ? OFFSET ?
+    `);
+        const products = stmt.all(...params, pageSize, offset);
+        return {
+            products,
+            total,
+            totalPages: Math.ceil(total / pageSize),
+            currentPage: page,
+            pageSize
+        };
+    },
+    search: (searchTerm, limit = 50) => {
+        const db = (0, database_1.getDatabase)();
+        if (!searchTerm.trim())
+            return [];
+        const stmt = db.prepare(`
+      SELECT * FROM products 
+      WHERE 
+        name LIKE ? OR 
+        description LIKE ? OR 
+        category LIKE ?
+      ORDER BY 
+        CASE 
+          WHEN name LIKE ? THEN 1
+          WHEN description LIKE ? THEN 2
+          WHEN category LIKE ? THEN 3
+          ELSE 4
+        END,
+        name
+      LIMIT ?
+    `);
+        const searchPattern = `%${searchTerm.trim()}%`;
+        const exactPattern = `${searchTerm.trim()}%`;
+        return stmt.all(searchPattern, searchPattern, searchPattern, exactPattern, exactPattern, exactPattern, limit);
+    },
+    getActive: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('SELECT * FROM products WHERE is_active = 1 ORDER BY name');
+        return stmt.all();
+    },
+    getById: (id) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('SELECT * FROM products WHERE id = ?');
+        const result = stmt.get(id);
+        if (!result) {
+            throw new Error(`Product with id ${id} not found`);
+        }
+        return result;
+    },
+    create: (product) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare("INSERT INTO products (name, price, cost_price, description, category, stock, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))");
+        const result = stmt.run(product.name, product.price, (product.cost_price ?? null), product.description || null, product.category || null, product.stock || null, product.is_active ? 1 : 0);
+        return result.lastInsertRowid;
+    },
+    update: (id, product) => {
+        const db = (0, database_1.getDatabase)();
+        const fields = [];
+        const values = [];
+        if (product.name !== undefined) {
+            fields.push('name = ?');
+            values.push(product.name);
+        }
+        if (product.price !== undefined) {
+            fields.push('price = ?');
+            values.push(product.price);
+        }
+        if (product.cost_price !== undefined) {
+            fields.push('cost_price = ?');
+            values.push(product.cost_price);
+        }
+        if (product.description !== undefined) {
+            fields.push('description = ?');
+            values.push(product.description);
+        }
+        if (product.category !== undefined) {
+            fields.push('category = ?');
+            values.push(product.category);
+        }
+        if (product.stock !== undefined) {
+            fields.push('stock = ?');
+            values.push(product.stock);
+        }
+        if (product.is_active !== undefined) {
+            fields.push('is_active = ?');
+            values.push(product.is_active ? 1 : 0);
+        }
+        fields.push("updated_at = datetime('now')");
+        if (fields.length === 0)
+            return;
+        values.push(id);
+        const stmt = db.prepare(`UPDATE products SET ${fields.join(', ')} WHERE id = ?`);
+        stmt.run(...values);
+    },
+    delete: (id) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('DELETE FROM products WHERE id = ?');
+        stmt.run(id);
+    },
+    getCount: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('SELECT COUNT(*) as count FROM products');
+        const result = stmt.get();
+        return result.count;
+    },
+    getMonthlyComparison: () => {
+        const db = (0, database_1.getDatabase)();
+        const currentMonthStmt = db.prepare(`
+      SELECT COUNT(*) as count FROM products 
+      WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')
+    `);
+        const previousMonthStmt = db.prepare(`
+      SELECT COUNT(*) as count FROM products 
+      WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now', '-1 month')
+    `);
+        const current = currentMonthStmt.get().count;
+        const previous = previousMonthStmt.get().count;
+        const change = previous === 0 ? 0 : ((current - previous) / previous) * 100;
+        return { current, previous, change };
+    },
+    deleteAll: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('DELETE FROM products');
+        stmt.run();
+    },
+    insertFromBackup: (product) => {
+        const db = (0, database_1.getDatabase)();
+        if (product.id === undefined || product.id === null) {
+            return exports.productOperations.create({
+                name: product.name,
+                price: product.price,
+                cost_price: product.cost_price,
+                description: product.description,
+                category: product.category,
+                stock: product.stock,
+                is_active: product.is_active,
+            });
+        }
+        const stmt = db.prepare(`
+      INSERT INTO products (
+        id, name, price, cost_price, description, category, stock, is_active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))
+    `);
+        const result = stmt.run(product.id, product.name, product.price, (product.cost_price ?? null), product.description || null, product.category || null, product.stock ?? null, product.is_active ? 1 : 0, product.created_at || null, product.updated_at || null);
+        return result.lastInsertRowid;
+    }
+};
+exports.saleOperations = {
+    getAll: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      SELECT s.*, c.name as customer_name
+      FROM sales s
+      LEFT JOIN customers c ON s.customer_id = c.id
+      ORDER BY s.date DESC
+    `);
+        return stmt.all();
+    },
+    getPaginated: (page = 1, pageSize = 10, searchTerm = '') => {
+        console.log('getPaginated ejecutándose en el proceso', process.type);
+        console.time('sales_query_total');
+        const db = (0, database_1.getDatabase)();
+        const offset = (page - 1) * pageSize;
+        let whereClause = '';
+        let params = [];
+        if (searchTerm.trim()) {
+            whereClause = 'WHERE s.sale_number LIKE ? OR s.reference_code LIKE ? OR c.name LIKE ? OR s.notes LIKE ?';
+            const searchPattern = `%${searchTerm.trim()}%`;
+            params = [searchPattern, searchPattern, searchPattern, searchPattern];
+        }
+        const countStmt = db.prepare(`
+      SELECT COUNT(*) as total 
+      FROM sales s
+      LEFT JOIN customers c ON s.customer_id = c.id
+      ${whereClause}
+    `);
+        const { total } = countStmt.get(...params);
+        const stmt = db.prepare(`
+      SELECT s.*, c.name as customer_name
+      FROM sales s
+      LEFT JOIN customers c ON s.customer_id = c.id
+      ${whereClause}
+      ORDER BY s.date DESC 
+      LIMIT ? OFFSET ?
+    `);
+        const sales = stmt.all(...params, pageSize, offset);
+        const itemsStmt = db.prepare('SELECT * FROM sale_items WHERE sale_id = ?');
+        sales.forEach(sale => {
+            if (sale.id) {
+                sale.items = itemsStmt.all(sale.id);
+            }
+        });
+        console.timeEnd('sales_query_total');
+        return {
+            sales,
+            total,
+            totalPages: Math.ceil(total / pageSize),
+            currentPage: page,
+            pageSize
+        };
+    },
+    search: (searchTerm, limit = 50) => {
+        const db = (0, database_1.getDatabase)();
+        if (!searchTerm.trim())
+            return [];
+        const stmt = db.prepare(`
+      SELECT s.*, c.name as customer_name
+      FROM sales s
+      LEFT JOIN customers c ON s.customer_id = c.id
+      WHERE 
+        s.sale_number LIKE ? OR 
+        s.reference_code LIKE ? OR 
+        c.name LIKE ? OR 
+        s.notes LIKE ?
+      ORDER BY 
+        CASE 
+          WHEN s.sale_number LIKE ? THEN 1
+          WHEN s.reference_code LIKE ? THEN 2
+          WHEN c.name LIKE ? THEN 3
+          WHEN s.notes LIKE ? THEN 4
+          ELSE 5
+        END,
+        s.date DESC
+      LIMIT ?
+    `);
+        const searchPattern = `%${searchTerm.trim()}%`;
+        const exactPattern = `${searchTerm.trim()}%`;
+        return stmt.all(searchPattern, searchPattern, searchPattern, searchPattern, exactPattern, exactPattern, exactPattern, exactPattern, limit);
+    },
+    getById: (id) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      SELECT s.*, c.name as customer_name
+      FROM sales s
+      LEFT JOIN customers c ON s.customer_id = c.id
+      WHERE s.id = ?
+    `);
+        const result = stmt.get(id);
+        if (!result) {
+            throw new Error(`Sale with id ${id} not found`);
+        }
+        return result;
+    },
+    getByCustomer: (customerId) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      SELECT s.*, c.name as customer_name
+      FROM sales s
+      LEFT JOIN customers c ON s.customer_id = c.id
+      WHERE s.customer_id = ?
+      ORDER BY s.date DESC
+    `);
+        return stmt.all(customerId);
+    },
+    getByPartner: (partnerId) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      SELECT s.*, c.name as customer_name
+      FROM sales s
+      LEFT JOIN customers c ON s.customer_id = c.id
+      WHERE 1 = 0
+    `);
+        return [];
+    },
+    getPaginatedByPartner: (_partnerId, _page = 1, _pageSize = 10, _searchTerm = '') => {
+        return { sales: [], total: 0, totalPages: 0, currentPage: 1, pageSize: 10 };
+    },
+    create: (saleData) => {
+        const db = (0, database_1.getDatabase)();
+        const subtotal = saleData.items.reduce((sum, item) => sum + (item.quantity * item.unit_price), 0);
+        const totalAmount = subtotal;
+        const saleNumber = generateUniqueSaleNumber();
+        const referenceCode = generateUniqueReferenceCode();
+        const saleStmt = db.prepare(`
+      INSERT INTO sales (
+        customer_id, sale_number, reference_code, date, due_date, subtotal, tax_amount,
+        discount_amount, total_amount, payment_type, payment_method, payment_status, period_type,
+        number_of_installments, installment_amount, advance_installments,
+        transaction_type, status, notes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+    `);
+        const installmentAmount = saleData.payment_type === 'installments' && saleData.number_of_installments
+            ? Math.round(totalAmount / saleData.number_of_installments)
+            : null;
+        const saleResult = saleStmt.run(saleData.customer_id, saleNumber, referenceCode, (saleData.date && typeof saleData.date === 'string') ? saleData.date : new Date().toISOString(), null, // due_date
+        subtotal, 0, // tax_amount
+        0, // discount_amount
+        totalAmount, saleData.payment_type, saleData.payment_method || null, saleData.payment_type === 'cash' ? 'paid' : 'unpaid', saleData.period_type || null, saleData.number_of_installments || null, installmentAmount, 'sale', 'completed', saleData.notes || null);
+        const saleId = saleResult.lastInsertRowid;
+        const itemStmt = db.prepare(`
+      INSERT INTO sale_items (
+        sale_id, product_id, quantity, unit_price, discount_per_item,
+        line_total, product_name, status, returned_quantity
+      ) VALUES (?, ?, ?, ?, 0, ?, ?, 'active', 0)
+    `);
+        for (const item of saleData.items) {
+            const lineTotal = (item.quantity * item.unit_price);
+            let productName = null;
+            if (item.product_id != null) {
+                try {
+                    const p = exports.productOperations.getById(item.product_id);
+                    productName = p?.name || null;
+                }
+                catch (_) {
+                    productName = null;
+                }
+            }
+            if (!productName) {
+                productName = item.product_name || (item.product_id != null ? `Producto ${item.product_id}` : 'Producto sin catálogo');
+            }
+            itemStmt.run(saleId, item.product_id, item.quantity, item.unit_price, lineTotal, productName);
+            if (item.product_id != null) {
+                try {
+                    const product = exports.productOperations.getById(item.product_id);
+                    if (product && product.stock !== undefined && product.stock !== null) {
+                        const newStock = Math.max(0, product.stock - item.quantity);
+                        exports.productOperations.update(item.product_id, { stock: newStock });
+                    }
+                }
+                catch (e) {
+                }
+            }
+        }
+        if (saleData.payment_type === 'installments' && saleData.number_of_installments) {
+            const monthlyAmount = Math.round(totalAmount / saleData.number_of_installments);
+            const installmentStmt = db.prepare(`
+        INSERT INTO installments (
+          sale_id, installment_number, original_installment_number,
+          due_date, original_due_date,
+          amount, paid_amount,
+          balance, status, days_overdue, late_fee, late_fee_applied
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+            // Usar aritmética de hilos YYYY-MM-DD para evitar el bug de las cuotas repetidas o desvíos de zona horaria
+            const saleDateISO = saleData.date || new Date().toISOString();
+            const match = saleDateISO.match(/^(\d{4})-(\d{2})-(\d{2})/);
+            const baseYear = match ? parseInt(match[1], 10) : new Date().getFullYear();
+            const baseMonth = match ? parseInt(match[2], 10) : new Date().getMonth() + 1;
+            const anchorDay = match ? parseInt(match[3], 10) : new Date().getDate();
+            for (let i = 1; i <= saleData.number_of_installments; i++) {
+                let targetMonth = baseMonth + i;
+                let targetYear = baseYear;
+                while (targetMonth > 12) {
+                    targetMonth -= 12;
+                    targetYear += 1;
+                }
+                const lastDayStr = new Date(Date.UTC(targetYear, targetMonth, 0)).toISOString();
+                const lastDay = parseInt(lastDayStr.match(/^(\d{4})-(\d{2})-(\d{2})/)[3], 10);
+                const finalDay = Math.min(anchorDay, lastDay);
+                const iso = `${targetYear}-${String(targetMonth).padStart(2, '0')}-${String(finalDay).padStart(2, '0')}`;
+                installmentStmt.run(saleId, i, i, iso, iso, monthlyAmount, 0, monthlyAmount, 'pending', 0, 0, 0);
+            }
+        }
+        return saleId;
+    },
+    importFromBackup: (sale) => {
+        const db = (0, database_1.getDatabase)();
+        if (sale.customer_id == null) {
+            throw new Error('customer_id es requerido para importar una venta');
+        }
+        const customerCheck = db.prepare('SELECT 1 FROM customers WHERE id = ?').get(sale.customer_id);
+        if (!customerCheck) {
+            exports.customerOperations.insertFromBackup({
+                id: sale.customer_id,
+                name: sale.customer_name || `Cliente ${sale.customer_id}`,
+            });
+        }
+        const saleNumber = ensureUniqueSaleNumber(sale.sale_number);
+        const referenceCode = ensureUniqueReferenceCode(sale.reference_code ? String(sale.reference_code) : undefined);
+        const date = sale.date || new Date().toISOString();
+        const subtotal = typeof sale.subtotal === 'number' ? sale.subtotal : 0;
+        const totalAmount = typeof sale.total_amount === 'number' ? sale.total_amount : subtotal;
+        const paymentType = (sale.payment_type === 'installments') ? 'installments' : 'cash';
+        const paymentStatus = (sale.payment_status === 'paid' || paymentType === 'cash') ? 'paid' : 'unpaid';
+        const numberOfInstallments = sale.number_of_installments || null;
+        const installmentAmount = typeof sale.installment_amount === 'number'
+            ? sale.installment_amount
+            : (numberOfInstallments ? Math.round(totalAmount / numberOfInstallments) : null);
+        const status = sale.status === 'pending' ? 'pending' : 'completed';
+        const transactionType = 'sale';
+        const notes = sale.notes || null;
+        const saleStmt = db.prepare(`
+      INSERT INTO sales (
+        customer_id, sale_number, reference_code, date, due_date, subtotal, tax_amount,
+        discount_amount, total_amount, payment_type, payment_method, payment_status, period_type,
+        number_of_installments, installment_amount, advance_installments,
+        transaction_type, status, notes
+      ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+    `);
+        const saleResult = saleStmt.run(sale.customer_id, saleNumber, referenceCode, date, sale.due_date || null, subtotal, totalAmount, paymentType, sale.payment_method || null, paymentStatus, sale.period_type || null, numberOfInstallments, installmentAmount, transactionType, status, notes);
+        const saleId = saleResult.lastInsertRowid;
+        if (sale.items && Array.isArray(sale.items) && sale.items.length > 0) {
+            const itemStmt = db.prepare(`
+        INSERT INTO sale_items (
+          sale_id, product_id, quantity, unit_price, discount_per_item,
+          line_total, product_name, product_description, status, returned_quantity
+        ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, 'active', 0)
+      `);
+            for (const item of sale.items) {
+                const lineTotal = (item.quantity * item.unit_price);
+                let productName = item.product_name || null;
+                if (!productName) {
+                    try {
+                        const p = exports.productOperations.getById(item.product_id);
+                        productName = p?.name || null;
+                    }
+                    catch (_) {
+                        productName = null;
+                    }
+                }
+                if (!productName) {
+                    productName = `Producto ${item.product_id}`;
+                }
+                itemStmt.run(saleId, item.product_id, item.quantity, item.unit_price, lineTotal, productName, null);
+            }
+        }
+        if (paymentType === 'installments' && numberOfInstallments) {
+            const monthlyAmount = installmentAmount || Math.round(totalAmount / numberOfInstallments);
+            const installmentStmt = db.prepare(`
+        INSERT INTO installments (
+          sale_id, installment_number, original_installment_number,
+          due_date, original_due_date,
+          amount, paid_amount,
+          balance, status, days_overdue, late_fee, late_fee_applied
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+            const saleDateISO = date;
+            const match = saleDateISO.match(/^(\d{4})-(\d{2})-(\d{2})/);
+            const baseYear = match ? parseInt(match[1], 10) : new Date().getFullYear();
+            const baseMonth = match ? parseInt(match[2], 10) : new Date().getMonth() + 1;
+            const anchorDay = match ? parseInt(match[3], 10) : new Date().getDate();
+            for (let i = 1; i <= numberOfInstallments; i++) {
+                let targetMonth = baseMonth + i;
+                let targetYear = baseYear;
+                while (targetMonth > 12) {
+                    targetMonth -= 12;
+                    targetYear += 1;
+                }
+                const lastDayStr = new Date(Date.UTC(targetYear, targetMonth, 0)).toISOString();
+                const lastDay = parseInt(lastDayStr.match(/^(\d{4})-(\d{2})-(\d{2})/)[3], 10);
+                const finalDay = Math.min(anchorDay, lastDay);
+                const iso = `${targetYear}-${String(targetMonth).padStart(2, '0')}-${String(finalDay).padStart(2, '0')}`;
+                installmentStmt.run(saleId, i, i, iso, iso, monthlyAmount, 0, monthlyAmount, 'pending', 0, 0, 0);
+            }
+        }
+        return saleId;
+    },
+    update: (id, sale) => {
+        const db = (0, database_1.getDatabase)();
+        const fields = [];
+        const values = [];
+        const updatableFields = [
+            'customer_id', 'due_date', 'tax_amount', 'discount_amount',
+            'payment_status', 'status', 'notes', 'period_type', 'date'
+        ];
+        for (const field of updatableFields) {
+            if (sale[field] !== undefined) {
+                fields.push(`${field} = ?`);
+                values.push(sale[field]);
+            }
+        }
+        if (fields.length === 0)
+            return;
+        values.push(id);
+        const stmt = db.prepare(`UPDATE sales SET ${fields.join(', ')} WHERE id = ?`);
+        stmt.run(...values);
+    },
+    delete: (id) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('DELETE FROM sales WHERE id = ?');
+        stmt.run(id);
+    },
+    getCount: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('SELECT COUNT(*) as count FROM sales');
+        const result = stmt.get();
+        return result.count;
+    },
+    getTotalRevenue: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      SELECT COALESCE(SUM(total_amount), 0) as total
+      FROM sales
+    `);
+        const result = stmt.get();
+        return result.total;
+    },
+    getRecent: (limit = 5) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      SELECT s.*, c.name as customer_name
+      FROM sales s
+      LEFT JOIN customers c ON s.customer_id = c.id
+      ORDER BY s.created_at DESC 
+      LIMIT ?
+    `);
+        return stmt.all(limit);
+    },
+    getSalesChartData: (days = 30) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      SELECT 
+        strftime('%Y-%m-%d', date) as date,
+        COUNT(*) as sales,
+        COALESCE(SUM(total_amount), 0) as revenue
+      FROM sales 
+      WHERE date >= date('now', '-' || ? || ' days')
+      GROUP BY strftime('%Y-%m-%d', date)
+      ORDER BY date
+    `);
+        return stmt.all(days);
+    },
+    getStatsComparison: () => {
+        const db = (0, database_1.getDatabase)();
+        const currentMonthStmt = db.prepare(`
+      SELECT COALESCE(SUM(total_amount), 0) as total FROM sales 
+      WHERE strftime('%Y-%m', date) = strftime('%Y-%m', 'now') AND status != 'refunded'
+    `);
+        const previousMonthStmt = db.prepare(`
+      SELECT COALESCE(SUM(total_amount), 0) as total FROM sales 
+      WHERE strftime('%Y-%m', date) = strftime('%Y-%m', 'now', '-1 month') AND status != 'refunded'
+    `);
+        const current = currentMonthStmt.get().total;
+        const previous = previousMonthStmt.get().total;
+        const change = previous === 0 ? 0 : ((current - previous) / previous) * 100;
+        return { current, previous, change };
+    },
+    getWithDetails: (id) => {
+        const sale = exports.saleOperations.getById(id);
+        sale.items = exports.saleItemOperations.getBySale(id);
+        sale.installments = exports.installmentOperations.getBySale(id);
+        return sale;
+    },
+    getOverdueSales: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      SELECT DISTINCT s.*, c.name as customer_name
+      FROM sales s
+      LEFT JOIN customers c ON s.customer_id = c.id
+      LEFT JOIN installments i ON s.id = i.sale_id
+      WHERE i.status = 'overdue' OR (s.payment_status = 'unpaid' AND s.due_date < date('now'))
+      ORDER BY s.date DESC
+    `);
+        return stmt.all();
+    },
+    getOverdueSalesCount: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      SELECT COUNT(DISTINCT s.id) AS count
+      FROM sales s
+      LEFT JOIN installments i ON s.id = i.sale_id
+      WHERE i.status = 'overdue' OR (s.payment_status = 'unpaid' AND s.due_date < date('now'))
+    `);
+        const result = stmt.get();
+        return result.count;
+    },
+    deleteAll: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('DELETE FROM sales');
+        stmt.run();
+    }
+};
+exports.saleItemOperations = {
+    getBySale: (saleId) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('SELECT * FROM sale_items WHERE sale_id = ?');
+        return stmt.all(saleId);
+    },
+    create: (saleItem) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      INSERT INTO sale_items (
+        sale_id, product_id, quantity, unit_price, discount_per_item,
+        line_total, product_name, product_description, status, returned_quantity
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+        const result = stmt.run(saleItem.sale_id, saleItem.product_id, saleItem.quantity, saleItem.unit_price, saleItem.line_total, saleItem.product_name, saleItem.product_description || null, saleItem.status, saleItem.returned_quantity);
+        return result.lastInsertRowid;
+    },
+    getSalesForProduct: (productId) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      SELECT DISTINCT 
+        s.id AS sale_id,
+        s.sale_number AS sale_number,
+        s.date AS date,
+        s.customer_id AS customer_id,
+        c.name AS customer_name
+      FROM sale_items si
+      INNER JOIN sales s ON si.sale_id = s.id
+      LEFT JOIN customers c ON s.customer_id = c.id
+      WHERE si.product_id = ?
+      ORDER BY s.date DESC
+    `);
+        return stmt.all(productId);
+    },
+    deleteAll: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('DELETE FROM sale_items');
+        stmt.run();
+    }
+};
+exports.installmentOperations = {
+    getById: (id) => {
+        const db = (0, database_1.getDatabase)();
+        const row = db.prepare('SELECT * FROM installments WHERE id = ?').get(id);
+        return row ?? null;
+    },
+    getBySale: (saleId) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('SELECT * FROM installments WHERE sale_id = ? ORDER BY COALESCE(original_installment_number, installment_number)');
+        return stmt.all(saleId);
+    },
+    getOverdue: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      SELECT i.*, c.name as customer_name, s.sale_number
+      FROM installments i
+      JOIN sales s ON i.sale_id = s.id
+      JOIN customers c ON s.customer_id = c.id
+      WHERE i.status IN ('pending','overdue') 
+      AND i.due_date < date('now')
+      AND i.balance > 0
+      ORDER BY i.due_date
+    `);
+        return stmt.all();
+    },
+    getUpcoming: (limit = 5) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      SELECT 
+        i.*,
+        c.name as customer_name,
+        s.sale_number,
+        s.customer_id as customer_id
+      FROM installments i
+      JOIN sales s ON i.sale_id = s.id
+      JOIN customers c ON s.customer_id = c.id
+      WHERE i.status IN ('pending') 
+      AND DATE(i.due_date) >= DATE('now')
+      AND DATE(i.due_date) <= DATE('now', '+3 days')
+      AND i.balance > 0
+      ORDER BY i.due_date ASC
+      LIMIT ?
+    `);
+        return stmt.all(limit);
+    },
+    recordPayment: (installmentId, amount, paymentMethod, reference, paymentDate) => {
+        const db = (0, database_1.getDatabase)();
+        const installment = db.prepare('SELECT * FROM installments WHERE id = ?').get(installmentId);
+        if (!installment) {
+            throw new Error(`Installment with id ${installmentId} not found`);
+        }
+        const expectedAmount = installment.amount - installment.paid_amount;
+        if (amount <= 0) {
+            throw new Error(`El monto debe ser mayor a 0`);
+        }
+        if (amount > expectedAmount) {
+            throw new Error(`El monto supera el saldo pendiente. Máximo: ${expectedAmount}`);
+        }
+        const newPaidAmount = installment.paid_amount + amount;
+        const newBalance = Math.max(0, installment.amount - newPaidAmount);
+        const newStatus = newBalance === 0 ? 'paid' : 'pending';
+        const updateStmt = db.prepare(`
+      UPDATE installments
+      SET paid_amount = ?, balance = ?, status = ?, paid_date = ?
+      WHERE id = ?
+    `);
+        const paidISO = paymentDate || new Date().toISOString();
+        const nextPaidDate = newStatus === 'paid' ? paidISO : (installment.paid_date || null);
+        updateStmt.run(newPaidAmount, newBalance, newStatus, nextPaidDate, installmentId);
+        const paymentStmt = db.prepare(`
+      INSERT INTO payment_transactions (
+        sale_id, installment_id, amount, payment_method, payment_reference,
+        transaction_date, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+        paymentStmt.run(installment.sale_id, installmentId, amount, paymentMethod, reference || null, paidISO, 'completed');
+        try {
+            const paidAt = new Date(paidISO);
+            const dueAt = new Date(installment.due_date);
+            if (paidAt.getTime() < dueAt.getTime()) {
+                db.prepare('UPDATE installments SET notes = ? WHERE id = ?').run('Pago adelantado', installmentId);
+            }
+        }
+        catch { }
+        let rescheduled;
+        if (newStatus === 'paid') {
+            try {
+                const saleInsts = db.prepare('SELECT * FROM installments WHERE sale_id = ? ORDER BY installment_number').all(installment.sale_id);
+                const updates = (0, installments_scheduler_1.scheduleAllPendingMonthly)(saleInsts);
+                for (const up of updates) {
+                    db.prepare('UPDATE installments SET due_date = ? WHERE id = ?').run(up.newDueISO, up.id);
+                }
+                if (updates.length > 0) {
+                    rescheduled = { nextPendingId: updates[0].id, newDueISO: updates[0].newDueISO };
+                }
+            }
+            catch (e) {
+                console.error('Error in recordPayment rescheduling:', e);
+            }
+        }
+        if (rescheduled) {
+            return { rescheduled };
+        }
+    },
+    applyLateFee: (installmentId, fee) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      UPDATE installments
+      SET late_fee = ?, late_fee_applied = 1, amount = amount + ?
+      WHERE id = ?
+    `);
+        stmt.run(fee, fee, installmentId);
+    },
+    revertPayment: (installmentId, transactionId) => {
+        const db = (0, database_1.getDatabase)();
+        const transactionStmt = db.prepare('SELECT * FROM payment_transactions WHERE id = ?');
+        const transaction = transactionStmt.get(transactionId);
+        if (!transaction) {
+            throw new Error(`Payment transaction with id ${transactionId} not found`);
+        }
+        const installment = db.prepare('SELECT * FROM installments WHERE id = ?').get(installmentId);
+        if (!installment) {
+            throw new Error(`Installment with id ${installmentId} not found`);
+        }
+        // Permitir revertir pagos parciales: restar el monto de la transacción
+        if (transaction.installment_id !== installmentId) {
+            throw new Error('La transacción no pertenece a la cuota indicada');
+        }
+        const newPaidAmount = Math.max(0, installment.paid_amount - transaction.amount);
+        const newBalance = Math.max(0, installment.amount - newPaidAmount);
+        const newStatus = newBalance === 0 ? 'paid' : 'pending';
+        const updateStmt = db.prepare(`
+      UPDATE installments
+      SET paid_amount = ?, balance = ?, status = ?, paid_date = ?,
+          notes = CASE WHEN ? = 'pending' THEN NULL ELSE notes END,
+          due_date = CASE WHEN ? = 'pending' THEN COALESCE(original_due_date, due_date) ELSE due_date END
+      WHERE id = ?
+    `);
+        const nextPaidDate = newStatus === 'paid' ? (installment.paid_date || null) : null;
+        updateStmt.run(newPaidAmount, newBalance, newStatus, nextPaidDate, newStatus, newStatus, installmentId);
+        const cancelTransactionStmt = db.prepare(`
+      UPDATE payment_transactions
+      SET status = 'cancelled'
+      WHERE id = ?
+    `);
+        cancelTransactionStmt.run(transactionId);
+    },
+    update: (id, data) => {
+        const db = (0, database_1.getDatabase)();
+        const fields = [];
+        const values = [];
+        const allowed = [
+            'due_date', 'status', 'amount', 'paid_amount', 'balance',
+            'days_overdue', 'late_fee', 'late_fee_applied', 'notes', 'paid_date'
+        ];
+        for (const key of allowed) {
+            const value = data[key];
+            if (value !== undefined) {
+                fields.push(`${key} = ?`);
+                values.push(value);
+            }
+        }
+        if (fields.length === 0)
+            return;
+        values.push(id);
+        const stmt = db.prepare(`UPDATE installments SET ${fields.join(', ')} WHERE id = ?`);
+        stmt.run(...values);
+        // Si se modificó la fecha o el estado, reprogramar las cuotas pendientes para mantener el ritmo mensual
+        if (data.due_date || data.status || data.paid_date) {
+            try {
+                const inst = db.prepare('SELECT sale_id FROM installments WHERE id = ?').get(id);
+                if (inst) {
+                    const saleInsts = db.prepare('SELECT * FROM installments WHERE sale_id = ? ORDER BY installment_number').all(inst.sale_id);
+                    const updates = (0, installments_scheduler_1.scheduleAllPendingMonthly)(saleInsts);
+                    for (const up of updates) {
+                        db.prepare('UPDATE installments SET due_date = ? WHERE id = ?').run(up.newDueISO, up.id);
+                    }
+                }
+            }
+            catch (e) {
+                console.error('Error auto-rescheduling after update:', e);
+            }
+        }
+    },
+    create: (installment) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      INSERT INTO installments (
+        sale_id, installment_number, original_installment_number,
+        due_date, original_due_date,
+        amount, paid_amount,
+        balance, status, paid_date, days_overdue, late_fee, late_fee_applied, notes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+        const result = stmt.run(installment.sale_id, installment.installment_number, (installment.original_installment_number ?? installment.installment_number), installment.due_date, (installment.original_due_date ?? installment.due_date), installment.amount, installment.paid_amount, installment.balance, installment.status, installment.paid_date || null, installment.days_overdue, installment.late_fee, installment.late_fee_applied ? 1 : 0, installment.notes || null);
+        return result.lastInsertRowid;
+    },
+    markAsPaid: (id, paymentDate) => {
+        const db = (0, database_1.getDatabase)();
+        const installment = db.prepare('SELECT * FROM installments WHERE id = ?').get(id);
+        if (!installment) {
+            throw new Error(`Installment with id ${id} not found`);
+        }
+        const remainingAmount = installment.amount - installment.paid_amount;
+        const stmt = db.prepare(`
+      UPDATE installments
+      SET paid_amount = amount, balance = 0, status = 'paid', paid_date = ?
+      WHERE id = ?
+    `);
+        const paidISO = paymentDate || new Date().toISOString();
+        stmt.run(paidISO, id);
+        if (remainingAmount > 0) {
+            const paymentStmt = db.prepare(`
+        INSERT INTO payment_transactions (
+          sale_id, installment_id, amount, payment_method, payment_reference,
+          transaction_date, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+            paymentStmt.run(installment.sale_id, id, remainingAmount, 'cash', 'Marcado como pagado', paidISO, 'completed');
+        }
+        let rescheduled;
+        try {
+            const saleInsts = db.prepare('SELECT * FROM installments WHERE sale_id = ? ORDER BY installment_number').all(installment.sale_id);
+            const updates = (0, installments_scheduler_1.scheduleAllPendingMonthly)(saleInsts);
+            for (const up of updates) {
+                db.prepare('UPDATE installments SET due_date = ? WHERE id = ?').run(up.newDueISO, up.id);
+            }
+            if (updates.length > 0) {
+                rescheduled = { nextPendingId: updates[0].id, newDueISO: updates[0].newDueISO };
+            }
+        }
+        catch (e) {
+            console.error('Error in markAsPaid rescheduling:', e);
+        }
+        if (rescheduled) {
+            return { rescheduled };
+        }
+    },
+    delete: (id) => {
+        const db = (0, database_1.getDatabase)();
+        const installment = db.prepare('SELECT * FROM installments WHERE id = ?').get(id);
+        if (!installment) {
+            throw new Error(`Installment with id ${id} not found`);
+        }
+        const deletePaymentsStmt = db.prepare('DELETE FROM payment_transactions WHERE installment_id = ?');
+        deletePaymentsStmt.run(id);
+        const stmt = db.prepare('DELETE FROM installments WHERE id = ?');
+        stmt.run(id);
+    },
+    deleteAll: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('DELETE FROM installments');
+        stmt.run();
+    }
+};
+exports.paymentOperations = {
+    getBySale: (saleId) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('SELECT * FROM payment_transactions WHERE sale_id = ? ORDER BY transaction_date DESC');
+        return stmt.all(saleId);
+    },
+    create: (payment) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      INSERT INTO payment_transactions (
+        sale_id, installment_id, amount, payment_method, payment_reference,
+        transaction_date, processed_by, status, notes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+        const result = stmt.run(payment.sale_id, payment.installment_id || null, payment.amount, payment.payment_method, payment.payment_reference || null, payment.transaction_date, payment.processed_by || null, payment.status, payment.notes || null);
+        return result.lastInsertRowid;
+    },
+    getOverdue: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      SELECT pt.* FROM payment_transactions pt
+      JOIN installments i ON pt.installment_id = i.id
+      WHERE i.status = 'overdue' OR (pt.status = 'pending' AND i.due_date < date('now'))
+      ORDER BY i.due_date
+    `);
+        return stmt.all();
+    },
+    deleteAll: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('DELETE FROM payment_transactions');
+        stmt.run();
+    }
+};
+exports.notificationOperations = {
+    list: (limit = 50) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('SELECT * FROM notifications WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT ?');
+        const results = stmt.all(limit);
+        return results.reverse();
+    },
+    unarchive: (id) => {
+        const db = (0, database_1.getDatabase)();
+        db.prepare('UPDATE notifications SET deleted_at = NULL WHERE id = ?').run(parseInt(id.toString()));
+    },
+    markRead: (id) => {
+        const db = (0, database_1.getDatabase)();
+        db.prepare("UPDATE notifications SET read_at = datetime('now') WHERE id = ? AND read_at IS NULL").run(id);
+    },
+    markUnread: (id) => {
+        const db = (0, database_1.getDatabase)();
+        db.prepare("UPDATE notifications SET read_at = NULL WHERE id = ?").run(id);
+    },
+    delete: (id) => {
+        const db = (0, database_1.getDatabase)();
+        db.prepare("UPDATE notifications SET deleted_at = datetime('now') WHERE id = ? AND deleted_at IS NULL").run(id);
+    },
+    deleteByMessageToday: (message) => {
+        const db = (0, database_1.getDatabase)();
+        db.prepare("UPDATE notifications SET deleted_at = datetime('now') WHERE message = ? AND date(created_at) = date('now') AND deleted_at IS NULL").run(message);
+    },
+    deleteByKeyToday: (key) => {
+        const db = (0, database_1.getDatabase)();
+        db.prepare("UPDATE notifications SET deleted_at = datetime('now') WHERE message_key = ? AND date(created_at) = date('now') AND deleted_at IS NULL").run(key);
+    },
+    create: (message, type = 'info', message_key) => {
+        const db = (0, database_1.getDatabase)();
+        const normalizedType = (type === 'attention' ? 'reminder' : type);
+        const res = db
+            .prepare('INSERT INTO notifications (message, type, message_key) VALUES (?, ?, ?)')
+            .run(message, normalizedType, message_key ?? null);
+        return res.lastInsertRowid;
+    },
+    existsTodayWithMessage: (message) => {
+        const db = (0, database_1.getDatabase)();
+        const row = db
+            .prepare("SELECT COUNT(*) as cnt FROM notifications WHERE message = ? AND (date(created_at) = date('now') OR date(deleted_at) = date('now'))")
+            .get(message);
+        return !!row && row.cnt > 0;
+    },
+    existsTodayWithKey: (key) => {
+        const db = (0, database_1.getDatabase)();
+        const row = db
+            .prepare("SELECT COUNT(*) as cnt FROM notifications WHERE message_key = ? AND (date(created_at) = date('now') OR date(deleted_at) = date('now'))")
+            .get(key);
+        return !!row && row.cnt > 0;
+    },
+    existsActiveWithKey: (key) => {
+        const db = (0, database_1.getDatabase)();
+        const row = db
+            .prepare("SELECT COUNT(*) as cnt FROM notifications WHERE message_key = ? AND deleted_at IS NULL")
+            .get(key);
+        return !!row && row.cnt > 0;
+    },
+    existsActiveWithMessage: (message) => {
+        const db = (0, database_1.getDatabase)();
+        const row = db
+            .prepare("SELECT COUNT(*) as cnt FROM notifications WHERE message = ? AND deleted_at IS NULL")
+            .get(message);
+        return !!row && row.cnt > 0;
+    },
+    clearAll: () => {
+        const db = (0, database_1.getDatabase)();
+        db.prepare("UPDATE notifications SET deleted_at = datetime('now') WHERE deleted_at IS NULL").run();
+    },
+    listArchived: (limit = 20) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('SELECT * FROM notifications WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC LIMIT ?');
+        return stmt.all(limit);
+    },
+    purgeArchived: () => {
+        const db = (0, database_1.getDatabase)();
+        db.prepare('DELETE FROM notifications WHERE deleted_at IS NOT NULL').run();
+    },
+    getLatestByKey: (key) => {
+        const db = (0, database_1.getDatabase)();
+        const row = db
+            .prepare("SELECT * FROM notifications WHERE message_key = ? ORDER BY datetime(created_at) DESC LIMIT 1")
+            .get(key);
+        return row ?? null;
+    },
+    purgeArchivedOlderThan: (days = 90) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare("DELETE FROM notifications WHERE deleted_at IS NOT NULL AND date(deleted_at) < date('now', '-' || ? || ' days')");
+        stmt.run(days);
+    },
+    dedupeActiveByMessageKey: () => {
+        const db = (0, database_1.getDatabase)();
+        try {
+            db.exec(`UPDATE notifications
+        SET deleted_at = datetime('now')
+        WHERE deleted_at IS NULL AND message_key IS NOT NULL AND id NOT IN (
+          SELECT MAX(id) FROM notifications WHERE deleted_at IS NULL AND message_key IS NOT NULL GROUP BY message_key
+        )`);
+        }
+        catch { }
+    }
+};
+exports.calendarOperations = {
+    getAll: () => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('SELECT * FROM calendar_events ORDER BY date ASC');
+        const rows = stmt.all();
+        return rows.map(row => ({
+            id: `custom-${row.id}`,
+            title: row.title,
+            description: row.description,
+            date: new Date(row.date),
+            type: row.type,
+            status: row.status,
+            amount: row.amount,
+            customerId: row.customer_id,
+            notes: row.notes,
+            createdAt: new Date(row.created_at),
+            updatedAt: new Date(row.updated_at)
+        }));
+    },
+    create: (event) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare(`
+      INSERT INTO calendar_events (title, description, date, type, status, amount, customer_id, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+        const result = stmt.run(event.title, event.description || null, event.date.toISOString(), event.type, event.status, event.amount || null, event.customerId || null, event.notes || null);
+        return result.lastInsertRowid;
+    },
+    update: (id, event) => {
+        const db = (0, database_1.getDatabase)();
+        const fields = [];
+        const values = [];
+        if (event.title !== undefined) {
+            fields.push('title = ?');
+            values.push(event.title);
+        }
+        if (event.description !== undefined) {
+            fields.push('description = ?');
+            values.push(event.description);
+        }
+        if (event.date !== undefined) {
+            fields.push('date = ?');
+            values.push(event.date.toISOString());
+        }
+        if (event.type !== undefined) {
+            fields.push('type = ?');
+            values.push(event.type);
+        }
+        if (event.status !== undefined) {
+            fields.push('status = ?');
+            values.push(event.status);
+        }
+        if (event.amount !== undefined) {
+            fields.push('amount = ?');
+            values.push(event.amount);
+        }
+        if (event.customerId !== undefined) {
+            fields.push('customer_id = ?');
+            values.push(event.customerId);
+        }
+        if (event.notes !== undefined) {
+            fields.push('notes = ?');
+            values.push(event.notes);
+        }
+        if (fields.length === 0)
+            return;
+        fields.push("updated_at = datetime('now')");
+        values.push(id);
+        const stmt = db.prepare(`UPDATE calendar_events SET ${fields.join(', ')} WHERE id = ?`);
+        stmt.run(...values);
+    },
+    delete: (id) => {
+        const db = (0, database_1.getDatabase)();
+        const stmt = db.prepare('DELETE FROM calendar_events WHERE id = ?');
+        stmt.run(id);
+    }
+};
+//# sourceMappingURL=database-operations.js.map

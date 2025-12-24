@@ -1,0 +1,881 @@
+import Database from 'better-sqlite3';
+import path from 'path';
+import { app } from 'electron';
+
+let db: Database.Database | null = null;
+
+
+
+function getDatabasePath(): string {
+  if (typeof window !== 'undefined') {
+
+
+    throw new Error('Database should only be accessed from the main process');
+  }
+
+  const userDataPath = app?.getPath('userData') || './';
+  return path.join(userDataPath, 'sales_management.db');
+}
+
+export function initializeDatabase(): Database.Database {
+  if (db) return db;
+
+  const dbPath = getDatabasePath();
+
+
+  console.log('Using database file at:', dbPath);
+  db = new Database(dbPath);
+
+
+
+  db.pragma('foreign_keys = ON');
+
+
+
+  createTables();
+  runMigrations();
+  applyPendingMigrations();
+
+  return db;
+}
+
+function createTables() {
+  if (!db) throw new Error('Database not initialized');
+
+
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS customers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      dni TEXT,
+      email TEXT,
+      phone TEXT,
+      secondary_phone TEXT,
+      address TEXT,
+      notes TEXT,
+      contact_info TEXT, -- Keep for backward compatibility
+      is_active BOOLEAN DEFAULT 1,
+      archived_at DATETIME,
+      created_at DATETIME DEFAULT (datetime('now')),
+      updated_at DATETIME DEFAULT (datetime('now'))
+    )
+  `);
+
+
+
+  try {
+    db.exec('ALTER TABLE customers ADD COLUMN dni TEXT');
+  } catch (e) { /* Column already exists */ }
+  try {
+    db.exec('ALTER TABLE customers ADD COLUMN email TEXT');
+  } catch (e) { /* Column already exists */ }
+  try {
+    db.exec('ALTER TABLE customers ADD COLUMN phone TEXT');
+  } catch (e) { /* Column already exists */ }
+  try {
+    db.exec('ALTER TABLE customers ADD COLUMN secondary_phone TEXT');
+  } catch (e) { /* Column already exists */ }
+  try {
+    db.exec('ALTER TABLE customers ADD COLUMN address TEXT');
+  } catch (e) { /* Column already exists */ }
+  try {
+    db.exec('ALTER TABLE customers ADD COLUMN notes TEXT');
+  } catch (e) { /* Column already exists */ }
+
+  try {
+    const info = db.prepare("PRAGMA table_info(customers)").all();
+    const hasIsActive = info.some((col: any) => col.name === 'is_active');
+    if (!hasIsActive) {
+      db.exec('ALTER TABLE customers ADD COLUMN is_active BOOLEAN DEFAULT 1');
+      db.exec('UPDATE customers SET is_active = 1 WHERE is_active IS NULL');
+    }
+  } catch (e) { /* Column already exists or add failed */ }
+  try {
+    const info2 = db.prepare("PRAGMA table_info(customers)").all();
+    const hasArchivedAt = info2.some((col: any) => col.name === 'archived_at');
+    if (!hasArchivedAt) {
+      db.exec('ALTER TABLE customers ADD COLUMN archived_at DATETIME');
+    }
+  } catch (e) { /* Column already exists or add failed */ }
+
+
+
+  const tableInfo = db.prepare("PRAGMA table_info(customers)").all();
+  const hasUpdatedAt = tableInfo.some((col: any) => col.name === 'updated_at');
+
+  if (!hasUpdatedAt) {
+    try {
+
+
+      db.exec('ALTER TABLE customers ADD COLUMN updated_at DATETIME');
+
+
+      db.exec("UPDATE customers SET updated_at = datetime('now') WHERE updated_at IS NULL");
+      console.log('Successfully added updated_at column to customers table');
+    } catch (e) {
+      console.error('Critical error: Failed to add updated_at column to customers table:', e);
+      throw new Error(`Database migration failed: ${e}`);
+    }
+  } else {
+    console.log('updated_at column already exists in customers table');
+  }
+
+
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS products (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      price DECIMAL(10,2) NOT NULL,
+      cost_price DECIMAL(10,2),
+      description TEXT,
+      category TEXT,
+      stock INTEGER,
+      is_active BOOLEAN DEFAULT 1,
+      created_at DATETIME DEFAULT (datetime('now')),
+      updated_at DATETIME DEFAULT (datetime('now'))
+    )
+  `);
+
+
+
+  const productsTableInfo = db.prepare("PRAGMA table_info(products)").all();
+  const hasCategory = productsTableInfo.some((col: any) => col.name === 'category');
+  const hasStock = productsTableInfo.some((col: any) => col.name === 'stock');
+  const hasCostPrice = productsTableInfo.some((col: any) => col.name === 'cost_price');
+  const hasProductCreatedAt = productsTableInfo.some((col: any) => col.name === 'created_at');
+  const hasProductUpdatedAt = productsTableInfo.some((col: any) => col.name === 'updated_at');
+
+  if (!hasCategory) {
+    try {
+      db.exec('ALTER TABLE products ADD COLUMN category TEXT');
+      console.log('Successfully added category column to products table');
+    } catch (e) {
+      console.error('Error adding category column to products table:', e);
+    }
+  }
+
+  if (!hasStock) {
+    try {
+      db.exec('ALTER TABLE products ADD COLUMN stock INTEGER');
+      console.log('Successfully added stock column to products table');
+    } catch (e) {
+      console.error('Error adding stock column to products table:', e);
+    }
+  }
+
+  if (!hasCostPrice) {
+    try {
+      db.exec('ALTER TABLE products ADD COLUMN cost_price DECIMAL(10,2)');
+      console.log('Successfully added cost_price column to products table');
+    } catch (e) {
+      console.error('Error adding cost_price column to products table:', e);
+    }
+  }
+
+
+
+  if (!hasProductCreatedAt) {
+    try {
+
+
+      db.exec('ALTER TABLE products ADD COLUMN created_at DATETIME');
+      db.exec("UPDATE products SET created_at = datetime('now') WHERE created_at IS NULL");
+      console.log('Successfully added created_at column to products table');
+    } catch (e) {
+      console.error('Error adding created_at column to products table:', e);
+    }
+  }
+
+  if (!hasProductUpdatedAt) {
+    try {
+
+
+      db.exec('ALTER TABLE products ADD COLUMN updated_at DATETIME');
+      db.exec("UPDATE products SET updated_at = datetime('now') WHERE updated_at IS NULL");
+      console.log('Successfully added updated_at column to products table');
+    } catch (e) {
+      console.error('Error adding updated_at column to products table:', e);
+    }
+  }
+
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sales (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      customer_id INTEGER,
+      sale_number TEXT NOT NULL UNIQUE,
+      date DATETIME DEFAULT CURRENT_TIMESTAMP,
+      due_date DATETIME,
+      subtotal DECIMAL(10,2) NOT NULL,
+      tax_amount DECIMAL(10,2) DEFAULT 0,
+      discount_amount DECIMAL(10,2) DEFAULT 0,
+      total_amount DECIMAL(10,2) NOT NULL,
+      payment_type TEXT CHECK(payment_type IN ('cash', 'installments', 'credit', 'mixed')) NOT NULL,
+      payment_method TEXT,
+      payment_status TEXT CHECK(payment_status IN ('paid', 'partial', 'unpaid', 'overdue')) DEFAULT 'unpaid',
+      period_type TEXT CHECK(period_type IN ('monthly', 'weekly', 'biweekly')),
+       number_of_installments INTEGER,
+      installment_amount DECIMAL(10,2),
+      advance_installments INTEGER DEFAULT 0,
+      transaction_type TEXT CHECK(transaction_type IN ('sale', 'return', 'exchange', 'refund')) DEFAULT 'sale',
+      status TEXT CHECK(status IN ('pending', 'completed', 'cancelled', 'refunded')) DEFAULT 'completed',
+      created_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      notes TEXT,
+      parent_sale_id INTEGER,
+      FOREIGN KEY (customer_id) REFERENCES customers(id),
+      FOREIGN KEY (parent_sale_id) REFERENCES sales(id)
+    )
+  `);
+
+
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS installments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sale_id INTEGER NOT NULL,
+      installment_number INTEGER NOT NULL,
+      original_installment_number INTEGER,
+      due_date DATE NOT NULL,
+      original_due_date DATE,
+      amount DECIMAL(10,2) NOT NULL,
+      paid_amount DECIMAL(10,2) DEFAULT 0,
+      balance DECIMAL(10,2) NOT NULL,
+      status TEXT CHECK(status IN ('pending', 'paid', 'partial', 'overdue', 'cancelled')) DEFAULT 'pending',
+      paid_date DATETIME,
+      days_overdue INTEGER DEFAULT 0,
+      late_fee DECIMAL(10,2) DEFAULT 0,
+      late_fee_applied BOOLEAN DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      notes TEXT,
+      FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE CASCADE
+    )
+  `);
+
+
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sale_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sale_id INTEGER NOT NULL,
+      product_id INTEGER,
+      quantity INTEGER NOT NULL,
+      unit_price DECIMAL(10,2) NOT NULL,
+      discount_per_item DECIMAL(10,2) DEFAULT 0,
+      line_total DECIMAL(10,2) NOT NULL,
+      product_name TEXT NOT NULL,
+      product_description TEXT,
+      status TEXT CHECK(status IN ('active', 'returned', 'exchanged')) DEFAULT 'active',
+      returned_quantity INTEGER DEFAULT 0,
+      FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE CASCADE,
+      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL
+    )
+  `);
+
+
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS payment_transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sale_id INTEGER NOT NULL,
+      installment_id INTEGER,
+      amount DECIMAL(10,2) NOT NULL,
+      payment_method TEXT CHECK(payment_method IN ('cash', 'credit_card', 'debit_card', 'bank_transfer', 'check')) NOT NULL,
+      payment_reference TEXT,
+      transaction_date DATETIME NOT NULL,
+      processed_by INTEGER,
+      status TEXT CHECK(status IN ('pending', 'completed', 'failed', 'cancelled')) DEFAULT 'pending',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      notes TEXT,
+      FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE CASCADE,
+      FOREIGN KEY (installment_id) REFERENCES installments(id)
+    )
+  `);
+
+
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      message TEXT NOT NULL,
+      type TEXT CHECK(type IN ('reminder', 'alert', 'info')) NOT NULL,
+      read_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+
+
+  try {
+    const notifInfo = db.prepare("PRAGMA table_info(notifications)").all();
+    const hasDeletedAt = notifInfo.some((col: any) => col.name === 'deleted_at');
+    if (!hasDeletedAt) {
+      db.exec('ALTER TABLE notifications ADD COLUMN deleted_at DATETIME');
+      console.log('Successfully added deleted_at column to notifications table');
+    }
+  } catch (e) {
+    console.error('Error adding deleted_at column to notifications table:', e);
+  }
+
+
+
+  try {
+    const notifInfo2 = db.prepare("PRAGMA table_info(notifications)").all();
+    const hasMessageKey = notifInfo2.some((col: any) => col.name === 'message_key');
+    if (!hasMessageKey) {
+      db.exec('ALTER TABLE notifications ADD COLUMN message_key TEXT');
+      console.log('Successfully added message_key column to notifications table');
+    }
+  } catch (e) {
+    console.error('Error adding message_key column to notifications table:', e);
+  }
+
+
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      description TEXT,
+      query_params TEXT, -- JSON string
+      generated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS calendar_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      description TEXT,
+      date DATETIME NOT NULL,
+      type TEXT NOT NULL,
+      status TEXT NOT NULL,
+      amount DECIMAL(10,2),
+      customer_id INTEGER,
+      related_payment_id INTEGER,
+      notes TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (customer_id) REFERENCES customers(id),
+      FOREIGN KEY (related_payment_id) REFERENCES payment_transactions(id)
+    )
+  `);
+
+
+
+
+
+  try {
+    db.exec(`
+      UPDATE notifications SET deleted_at = datetime('now')
+      WHERE id IN (
+        SELECT n1.id FROM notifications n1
+        JOIN notifications n2
+          ON n1.message_key = n2.message_key
+         AND n1.id < n2.id
+        WHERE n1.deleted_at IS NULL AND n2.deleted_at IS NULL AND n1.message_key IS NOT NULL
+      );
+    `);
+  } catch (e) {
+    console.error('Error deduplicating notifications before index creation:', e);
+  }
+
+
+
+  db.exec(`
+    -- Customer table indexes for optimized search and queries
+     
+     -- Unique active notifications by message_key to prevent duplicates
+     CREATE UNIQUE INDEX IF NOT EXISTS uniq_notifications_message_key_active
+       ON notifications(message_key)
+       WHERE deleted_at IS NULL;
+ 
+     CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name);
+     CREATE INDEX IF NOT EXISTS idx_customers_email ON customers(email);
+     CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
+     CREATE INDEX IF NOT EXISTS idx_customers_secondary_phone ON customers(secondary_phone);
+     CREATE INDEX IF NOT EXISTS idx_customers_created_at ON customers(created_at);
+    CREATE INDEX IF NOT EXISTS idx_customers_updated_at ON customers(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_customers_is_active ON customers(is_active);
+    CREATE INDEX IF NOT EXISTS idx_customers_archived_at ON customers(archived_at);
+    CREATE INDEX IF NOT EXISTS idx_customers_name_email ON customers(name, email);
+    CREATE INDEX IF NOT EXISTS idx_customers_search ON customers(name, email);
+    
+    -- Product table indexes
+    CREATE INDEX IF NOT EXISTS idx_products_name ON products(name);
+    CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
+    CREATE INDEX IF NOT EXISTS idx_products_created_at ON products(created_at);
+    CREATE INDEX IF NOT EXISTS idx_products_updated_at ON products(updated_at);
+    
+    -- Sales and related table indexes (safe subset)
+    CREATE INDEX IF NOT EXISTS idx_sales_customer_id ON sales(customer_id);
+    CREATE INDEX IF NOT EXISTS idx_sales_date ON sales(date);
+    CREATE INDEX IF NOT EXISTS idx_sales_due_date ON sales(due_date);
+    CREATE INDEX IF NOT EXISTS idx_sales_payment_status ON sales(payment_status);
+    CREATE INDEX IF NOT EXISTS idx_sales_payment_status_due_date ON sales(payment_status, due_date);
+    CREATE INDEX IF NOT EXISTS idx_installments_sale_id ON installments(sale_id);
+    CREATE INDEX IF NOT EXISTS idx_installments_due_date ON installments(due_date);
+    CREATE INDEX IF NOT EXISTS idx_installments_status ON installments(status);
+    CREATE INDEX IF NOT EXISTS idx_sale_items_sale_id ON sale_items(sale_id);
+    CREATE INDEX IF NOT EXISTS idx_sale_items_product_id ON sale_items(product_id);
+    CREATE INDEX IF NOT EXISTS idx_payment_transactions_sale_id ON payment_transactions(sale_id);
+    CREATE INDEX IF NOT EXISTS idx_payment_transactions_transaction_date ON payment_transactions(transaction_date);
+    CREATE INDEX IF NOT EXISTS idx_calendar_events_date ON calendar_events(date);
+
+    -- Notifications indexes
+    CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at);
+    CREATE INDEX IF NOT EXISTS idx_notifications_deleted_at ON notifications(deleted_at);
+    CREATE INDEX IF NOT EXISTS idx_notifications_message ON notifications(message);
+    CREATE INDEX IF NOT EXISTS idx_notifications_message_key ON notifications(message_key);
+  `);
+
+
+
+
+}
+
+function runMigrations() {
+  if (!db) throw new Error('Database not initialized');
+
+
+
+  const tableInfo = db.prepare("PRAGMA table_info(sales)").all();
+  const columnNames = tableInfo.map((col: any) => col.name);
+
+  console.log('Current sales table columns:', columnNames);
+
+
+
+  const requiredColumns = ['sale_number', 'subtotal', 'tax_amount', 'discount_amount', 'payment_status', 'advance_installments'];
+  const missingColumns = requiredColumns.filter(col => !columnNames.includes(col));
+
+
+
+  const hasPartnerId = columnNames.includes('partner_id');
+  const hasPeriodType = columnNames.includes('period_type');
+  const hasPaymentMethod = columnNames.includes('payment_method');
+  const hasReferenceCode = columnNames.includes('reference_code');
+  const hasPaymentPeriod = columnNames.includes('payment_period');
+
+
+
+  const saleItemsTableInfo = db.prepare("PRAGMA table_info(sale_items)").all();
+  const product_id_column = saleItemsTableInfo.find((col: any) => col.name === 'product_id');
+  const needsProductIDMigration = product_id_column && (product_id_column as any).notnull === 1;
+
+
+
+  const onlyMissingPartnerId = false;
+  const onlyMissingPeriodType = missingColumns.length === 0 && !needsProductIDMigration && !hasPeriodType;
+  const onlyMissingPaymentMethod = missingColumns.length === 0 && !needsProductIDMigration && !hasPaymentMethod;
+  const onlyMissingReferenceCode = missingColumns.length === 0 && !needsProductIDMigration && !hasReferenceCode;
+  const onlyMissingPaymentPeriod = false;
+  if (onlyMissingPartnerId) {
+    try {
+      db.exec('ALTER TABLE sales ADD COLUMN partner_id INTEGER');
+      console.log('Successfully added partner_id column to sales table');
+    } catch (e) {
+      console.error('Error adding partner_id column to sales table:', e);
+    }
+
+
+
+
+
+    return;
+  }
+
+
+
+  if (onlyMissingPeriodType) {
+    try {
+      db.exec('ALTER TABLE sales ADD COLUMN period_type TEXT');
+      console.log('Successfully added period_type column to sales table');
+    } catch (e) {
+      console.error('Error adding period_type column to sales table:', e);
+    }
+    return;
+  }
+
+
+
+
+
+
+  if (onlyMissingPaymentMethod) {
+    try {
+      db.exec('ALTER TABLE sales ADD COLUMN payment_method TEXT');
+      console.log('Successfully added payment_method column to sales table');
+    } catch (e) {
+      console.error('Error adding payment_method column to sales table:', e);
+    }
+    return;
+  }
+
+
+
+  if (onlyMissingReferenceCode) {
+    try {
+      db.exec('ALTER TABLE sales ADD COLUMN reference_code TEXT');
+      console.log('Successfully added reference_code column to sales table');
+    } catch (e) {
+      console.error('Error adding reference_code column to sales table:', e);
+    }
+
+
+
+    try {
+      const selectStmt = db.prepare("SELECT id FROM sales WHERE reference_code IS NULL OR reference_code = ''");
+      const updateStmt = db.prepare('UPDATE sales SET reference_code = ? WHERE id = ?');
+      const existsStmt = db.prepare('SELECT COUNT(1) as c FROM sales WHERE reference_code = ?');
+
+      const generateCode = (length: number = 8): string => {
+        let code = '';
+        for (let i = 0; i < length; i++) {
+          code += Math.floor(Math.random() * 10).toString();
+        }
+        return code;
+      };
+
+      const rows = selectStmt.all() as Array<{ id: number }>;
+      for (const row of rows) {
+        let code = generateCode(8);
+
+
+        let attempts = 0;
+        while (true) {
+          const { c } = existsStmt.get(code) as { c: number };
+          if (c === 0) break;
+          code = generateCode(attempts < 3 ? 9 : 12);
+          attempts++;
+        }
+        updateStmt.run(code, row.id);
+      }
+
+
+
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_reference_code_unique ON sales(reference_code)');
+      console.log('Backfilled and ensured unique index on sales.reference_code');
+    } catch (e) {
+      console.error('Error backfilling reference_code:', e);
+    }
+
+    return;
+  }
+
+
+
+  if (hasReferenceCode) {
+    try {
+      const needBackfill = db.prepare("SELECT COUNT(1) as c FROM sales WHERE reference_code IS NULL OR reference_code = ''").get() as { c: number };
+      if (needBackfill.c > 0) {
+        const selectStmt = db.prepare("SELECT id FROM sales WHERE reference_code IS NULL OR reference_code = ''");
+        const updateStmt = db.prepare('UPDATE sales SET reference_code = ? WHERE id = ?');
+        const existsStmt = db.prepare('SELECT COUNT(1) as c FROM sales WHERE reference_code = ?');
+
+        const generateCode = (length: number = 8): string => {
+          let code = '';
+          for (let i = 0; i < length; i++) {
+            code += Math.floor(Math.random() * 10).toString();
+          }
+          return code;
+        };
+
+        const rows = selectStmt.all() as Array<{ id: number }>;
+        for (const row of rows) {
+          let code = generateCode(8);
+          let attempts = 0;
+          while (true) {
+            const { c } = existsStmt.get(code) as { c: number };
+            if (c === 0) break;
+            code = generateCode(attempts < 3 ? 9 : 12);
+            attempts++;
+          }
+          updateStmt.run(code, row.id);
+        }
+        console.log(`Backfilled reference_code for ${rows.length} sale(s)`);
+      }
+
+
+
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_reference_code_unique ON sales(reference_code)');
+      console.log('Ensured unique index on sales.reference_code');
+    } catch (e) {
+      console.error('Error ensuring reference_code backfill/index:', e);
+    }
+  }
+
+  if (missingColumns.length > 0 || needsProductIDMigration) {
+    console.log('Missing columns detected or sale_items table needs migration:', missingColumns);
+
+
+
+    let existingData: any[] = [];
+    try {
+      existingData = db.prepare('SELECT * FROM sales').all();
+      console.log('Backing up existing sales data:', existingData.length, 'records');
+    } catch (error) {
+      console.log('No existing sales data to backup');
+    }
+
+
+
+    db.exec('DROP TABLE IF EXISTS sales');
+    db.exec('DROP TABLE IF EXISTS sale_items');
+    db.exec('DROP TABLE IF EXISTS installments');
+    db.exec('DROP TABLE IF EXISTS payment_transactions');
+
+
+
+    createSalesRelatedTables();
+    console.log('Sales table recreated with new schema');
+  }
+
+
+
+
+  try {
+    const duplicates = db.prepare(`
+      SELECT sale_number, COUNT(*) as c
+      FROM sales
+      GROUP BY sale_number
+      HAVING c > 1
+    `).all();
+    if (duplicates.length === 0) {
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_sale_number_unique ON sales(sale_number)');
+      console.log('Ensured unique index on sales.sale_number');
+    } else {
+      console.warn('Skipped unique index on sales.sale_number due to duplicates:', duplicates.length);
+    }
+  } catch (e) {
+    console.error('Error ensuring unique index for sales.sale_number:', e);
+  }
+}
+
+function createSalesRelatedTables() {
+  if (!db) throw new Error('Database not initialized');
+
+
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sales (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      customer_id INTEGER,
+      sale_number TEXT NOT NULL,
+      reference_code TEXT,
+      date DATETIME DEFAULT CURRENT_TIMESTAMP,
+      due_date DATETIME,
+      subtotal DECIMAL(10,2) NOT NULL,
+      tax_amount DECIMAL(10,2) DEFAULT 0,
+      discount_amount DECIMAL(10,2) DEFAULT 0,
+      total_amount DECIMAL(10,2) NOT NULL,
+      payment_type TEXT CHECK(payment_type IN ('cash', 'installments', 'credit', 'mixed')) NOT NULL,
+      payment_method TEXT,
+      payment_status TEXT CHECK(payment_status IN ('paid', 'partial', 'unpaid', 'overdue')) DEFAULT 'unpaid',
+      period_type TEXT CHECK(period_type IN ('monthly', 'weekly', 'biweekly')),
+       number_of_installments INTEGER,
+      installment_amount DECIMAL(10,2),
+      advance_installments INTEGER DEFAULT 0,
+      transaction_type TEXT CHECK(transaction_type IN ('sale', 'return', 'exchange', 'refund')) DEFAULT 'sale',
+      status TEXT CHECK(status IN ('pending', 'completed', 'cancelled', 'refunded')) DEFAULT 'completed',
+      created_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      notes TEXT,
+      parent_sale_id INTEGER,
+      FOREIGN KEY (customer_id) REFERENCES customers(id),
+      FOREIGN KEY (parent_sale_id) REFERENCES sales(id)
+    )
+  `);
+
+
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS installments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sale_id INTEGER NOT NULL,
+      installment_number INTEGER NOT NULL,
+      original_installment_number INTEGER,
+      due_date DATE NOT NULL,
+      original_due_date DATE,
+      amount DECIMAL(10,2) NOT NULL,
+      paid_amount DECIMAL(10,2) DEFAULT 0,
+      balance DECIMAL(10,2) NOT NULL,
+      status TEXT CHECK(status IN ('pending', 'paid', 'partial', 'overdue', 'cancelled')) DEFAULT 'pending',
+      paid_date DATETIME,
+      days_overdue INTEGER DEFAULT 0,
+      late_fee DECIMAL(10,2) DEFAULT 0,
+      late_fee_applied BOOLEAN DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      notes TEXT,
+      FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE CASCADE
+    )
+  `);
+
+
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sale_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sale_id INTEGER NOT NULL,
+      product_id INTEGER,
+      quantity INTEGER NOT NULL,
+      unit_price DECIMAL(10,2) NOT NULL,
+      discount_per_item DECIMAL(10,2) DEFAULT 0,
+      line_total DECIMAL(10,2) NOT NULL,
+      product_name TEXT NOT NULL,
+      product_description TEXT,
+      status TEXT CHECK(status IN ('active', 'returned', 'exchanged')) DEFAULT 'active',
+      returned_quantity INTEGER DEFAULT 0,
+      FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE CASCADE,
+      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL
+    )
+  `);
+
+
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS payment_transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sale_id INTEGER NOT NULL,
+      installment_id INTEGER,
+      amount DECIMAL(10,2) NOT NULL,
+      payment_method TEXT CHECK(payment_method IN ('cash', 'credit_card', 'debit_card', 'bank_transfer', 'check')) NOT NULL,
+      payment_reference TEXT,
+      transaction_date DATETIME NOT NULL,
+      processed_by INTEGER,
+      status TEXT CHECK(status IN ('pending', 'completed', 'failed', 'cancelled')) DEFAULT 'pending',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      notes TEXT,
+      FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE CASCADE,
+      FOREIGN KEY (installment_id) REFERENCES installments(id)
+    )
+  `);
+}
+
+export function getSchemaVersion(): number {
+  if (!db) throw new Error('Database not initialized');
+  const row = db.prepare('PRAGMA user_version').get() as { user_version: number };
+  return row?.user_version || 0;
+}
+
+function setSchemaVersion(v: number) {
+  if (!db) throw new Error('Database not initialized');
+  db.pragma(`user_version = ${v}`);
+}
+
+export function getLatestSchemaVersion(): number {
+  // Keep this in sync with applyPendingMigrations highest version
+  return 2;
+}
+
+export function applyPendingMigrations() {
+  if (!db) throw new Error('Database not initialized');
+  const currentVersion = getSchemaVersion();
+
+  if (currentVersion < 1) {
+    const salesInfo = db.prepare('PRAGMA table_info(sales)').all();
+    const columns = new Set((salesInfo as any[]).map((c: any) => c.name));
+    if (false) {
+      // partner_id disabled
+    }
+    if (!columns.has('period_type')) {
+      try { db.exec('ALTER TABLE sales ADD COLUMN period_type TEXT'); } catch { }
+    }
+    if (false) {
+      // payment_period disabled
+    }
+    if (!columns.has('payment_method')) {
+      try { db.exec('ALTER TABLE sales ADD COLUMN payment_method TEXT'); } catch { }
+    }
+    if (!columns.has('reference_code')) {
+      try { db.exec('ALTER TABLE sales ADD COLUMN reference_code TEXT'); } catch { }
+    }
+    try {
+      const needBackfill = db.prepare("SELECT COUNT(1) as c FROM sales WHERE reference_code IS NULL OR reference_code = ''").get() as { c: number };
+      if (needBackfill.c > 0) {
+        const selectStmt = db.prepare("SELECT id FROM sales WHERE reference_code IS NULL OR reference_code = ''");
+        const updateStmt = db.prepare('UPDATE sales SET reference_code = ? WHERE id = ?');
+        const existsStmt = db.prepare('SELECT COUNT(1) as c FROM sales WHERE reference_code = ?');
+        const generateCode = (length: number = 8): string => {
+          let code = '';
+          for (let i = 0; i < length; i++) {
+            code += Math.floor(Math.random() * 10).toString();
+          }
+          return code;
+        };
+        const rows = selectStmt.all() as Array<{ id: number }>;
+        for (const row of rows) {
+          let code = generateCode(8);
+          let attempts = 0;
+          while (true) {
+            const { c } = existsStmt.get(code) as { c: number };
+            if (c === 0) break;
+            code = generateCode(attempts < 3 ? 9 : 12);
+            attempts++;
+          }
+          updateStmt.run(code, row.id);
+        }
+        db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_reference_code_unique ON sales(reference_code)');
+      }
+    } catch { }
+    setSchemaVersion(1);
+  }
+
+  if (currentVersion < 2) {
+    try {
+      db.exec('CREATE TABLE IF NOT EXISTS payment_transactions (\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n        sale_id INTEGER NOT NULL,\n        installment_id INTEGER,\n        amount DECIMAL(10,2) NOT NULL,\n        payment_method TEXT CHECK(payment_method IN (\'cash\', \'credit_card\', \'debit_card\', \'bank_transfer\', \'check\')) NOT NULL,\n        payment_reference TEXT,\n        transaction_date DATETIME NOT NULL,\n        processed_by INTEGER,\n        status TEXT CHECK(status IN (\'pending\', \'completed\', \'failed\', \'cancelled\')) DEFAULT \'pending\',\n        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,\n        notes TEXT,\n        FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE CASCADE,\n        FOREIGN KEY (installment_id) REFERENCES installments(id)\n      )');
+    } catch { }
+    try {
+      const duplicates = db.prepare('SELECT sale_number, COUNT(*) as c FROM sales GROUP BY sale_number HAVING c > 1').all() as any[];
+      if (duplicates.length === 0) {
+        db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_sale_number_unique ON sales(sale_number)');
+      }
+    } catch { }
+
+    setSchemaVersion(2);
+  }
+
+  // Migration v3: add original fields to installments and backfill
+  if (currentVersion < 3) {
+    try {
+      const info = db.prepare('PRAGMA table_info(installments)').all() as any[];
+      const cols = new Set(info.map((c: any) => c.name));
+      if (!cols.has('original_due_date')) {
+        db.exec('ALTER TABLE installments ADD COLUMN original_due_date DATE');
+      }
+      if (!cols.has('original_installment_number')) {
+        db.exec('ALTER TABLE installments ADD COLUMN original_installment_number INTEGER');
+      }
+
+      // Backfill original fields where null
+      db.exec(`UPDATE installments SET original_due_date = due_date WHERE original_due_date IS NULL`);
+      db.exec(`UPDATE installments SET original_installment_number = installment_number WHERE original_installment_number IS NULL`);
+    } catch (e) {
+      console.error('Error applying v3 installments original fields migration:', e);
+    }
+    setSchemaVersion(3);
+  }
+}
+
+export function getDatabase(): Database.Database {
+  if (!db) {
+    throw new Error('Database not initialized. Call initializeDatabase() first.');
+  }
+  return db;
+}
+
+export function closeDatabase() {
+  if (db) {
+    db.close();
+    db = null;
+  }
+}

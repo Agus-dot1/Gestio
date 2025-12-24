@@ -1,0 +1,1361 @@
+'use client';
+
+import { useState, useEffect, useMemo, useImperativeHandle, forwardRef, useRef, useCallback } from 'react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Skeleton } from '@/components/ui/skeleton';
+import {
+  Search,
+  ChevronDown,
+  ChevronRight,
+  User,
+  Calendar as CalendarIcon,
+  DollarSign,
+  AlertTriangle,
+  CheckCircle,
+  Clock,
+  Plus,
+  Edit,
+  Trash2,
+  Filter,
+  X,
+  CreditCard,
+  Phone,
+  Mail,
+  MapPin,
+  Eye,
+  MoreHorizontal,
+  Copy,
+  Package,
+  MessageCircle,
+  CalendarArrowDown,
+  LucideCalendar
+} from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { InstallmentForm } from '../installment-form';
+import { InstallmentPaymentDialog } from './installment-payment-dialog';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card';
+import dynamic from 'next/dynamic';
+import { es } from 'date-fns/locale';
+import { format, parseISO } from 'date-fns';
+
+import type { Customer, Sale, Installment } from '@/lib/database-operations';
+import { toast } from 'sonner';
+import { scheduleAllPendingMonthly, validateSequentialPayment } from '@/lib/installments-scheduler';
+
+interface CustomerWithInstallments extends Customer {
+  sales: Sale[];
+  installments: Installment[];
+  totalOwed: number;
+  overdueAmount: number;
+  nextPaymentDate: string | null;
+}
+
+interface InstallmentDashboardProps {
+  highlightId?: string | null;
+  onRefresh?: () => void;
+  partnerId?: number | null;
+}
+
+export interface InstallmentDashboardRef {
+  refreshData: () => Promise<void>;
+}
+
+type StatusFilter = 'all' | 'pending' | 'paid' | 'overdue';
+type SortBy = 'customer' | 'amount' | 'dueDate' | 'status';
+
+export const InstallmentDashboard = forwardRef<InstallmentDashboardRef, InstallmentDashboardProps>(({ highlightId, onRefresh, partnerId }, ref) => {
+  const [customers, setCustomers] = useState<CustomerWithInstallments[]>([]);
+  const [expandedCustomers, setExpandedCustomers] = useState<Set<number>>(new Set());
+  const [expandedSales, setExpandedSales] = useState<Set<number>>(new Set());
+  const [isLoading, setIsLoading] = useState(true);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [sortBy, setSortBy] = useState<SortBy>('customer');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+  const [periodFilter, setPeriodFilter] = useState<'all' | 'monthly' | 'weekly' | 'biweekly'>('all');
+  const [selectedInstallment, setSelectedInstallment] = useState<Installment | null>(null);
+  const [isInstallmentFormOpen, setIsInstallmentFormOpen] = useState(false);
+  const [paymentDialogOpen, setPaymentDialogOpen] = useState(false);
+  const [paymentInstallment, setPaymentInstallment] = useState<Installment | null>(null);
+  const [deleteCustomer, setDeleteCustomer] = useState<CustomerWithInstallments | null>(null);
+  const [deleteSale, setDeleteSale] = useState<Sale | null>(null);
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(searchTerm);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchTerm]);
+
+  const [isElectron] = useState(() => typeof window !== 'undefined' && !!window.electronAPI);
+  const [openDatePickerId, setOpenDatePickerId] = useState<number | null>(null);
+  const [openMarkPaidPickerId, setOpenMarkPaidPickerId] = useState<number | null>(null);
+  const [selectedPaymentDates, setSelectedPaymentDates] = useState<Map<number, string>>(new Map());
+
+  const Calendar = dynamic(() => import('@/components/ui/calendar').then(m => m.Calendar), {
+    ssr: false,
+  });
+
+  /* Ref to track if we have done the initial data load to avoid skeleton flash on subsequent updates */
+  const initializedRef = useRef(false);
+
+  const loadInstallmentData = useCallback(async () => {
+    console.log('[InstallmentDashboard] Starting reload...')
+    // Only show full skeleton on first load AND if we don't have customers yet
+    if (!initializedRef.current && customers.length === 0) {
+      setIsLoading(true);
+    }
+
+    try {
+      const [allCustomers, allSalesUnfiltered] = await Promise.all([
+        window.electronAPI.database.customers.getAll(),
+        window.electronAPI.database.sales.getAll()
+      ]);
+
+      const allSales = partnerId
+        ? allSalesUnfiltered.filter(s => (s.partner_id || 0) === Number(partnerId))
+        : allSalesUnfiltered;
+
+      const customersWithInstallments: CustomerWithInstallments[] = [];
+
+      for (const customer of allCustomers) {
+        const customerSales = allSales.filter(sale => sale.customer_id === customer.id);
+        const installmentSales = customerSales.filter(sale => sale.payment_type === 'installments');
+
+        if (installmentSales.length === 0) continue;
+
+        const salesWithItems = await Promise.all(
+          installmentSales.map(async (sale) => {
+            try {
+              const items = await window.electronAPI.database.saleItems.getBySale(sale.id!);
+              return { ...sale, items };
+            } catch (e) {
+              console.warn('No se pudieron obtener items para la venta', sale.id, e);
+              return { ...sale, items: [] };
+            }
+          })
+        );
+
+        let allInstallments: Installment[] = [];
+        for (const sale of installmentSales) {
+          const saleInstallments = await window.electronAPI.database.installments.getBySale(sale.id!);
+          allInstallments = [...allInstallments, ...saleInstallments];
+        }
+
+        const totalOwed = allInstallments
+          .filter(inst => inst.status !== 'paid')
+          .reduce((sum, inst) => sum + inst.balance, 0);
+
+        const overdueAmount = allInstallments
+          .filter(inst => inst.status === 'overdue' || (inst.status === 'pending' && new Date(inst.due_date) < new Date()))
+          .reduce((sum, inst) => sum + inst.balance, 0);
+
+        const nextPayment = allInstallments
+          .filter(inst => inst.status === 'pending')
+          .sort((a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime())[0];
+
+        customersWithInstallments.push({
+          ...customer,
+          sales: salesWithItems,
+          installments: allInstallments,
+          totalOwed,
+          overdueAmount,
+          nextPaymentDate: nextPayment?.due_date || null
+        });
+      }
+
+      setCustomers(customersWithInstallments);
+      initializedRef.current = true;
+      console.log('[InstallmentDashboard] Reload complete')
+    } catch (error) {
+      console.error('Error loading installment data:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [partnerId]);
+
+  // Reset initialized state when partnerId changes to show loader for new data context
+  useEffect(() => {
+    initializedRef.current = false;
+    setCustomers([]); // Clear old customers to show loading skeleton for new partner
+  }, [partnerId]);
+
+
+
+  useImperativeHandle(ref, () => ({
+    refreshData: loadInstallmentData
+  }), [loadInstallmentData]);
+
+  useEffect(() => {
+    if (isElectron) {
+      loadInstallmentData();
+    }
+  }, [isElectron, partnerId, loadInstallmentData]);
+
+
+
+  const highlightAppliedRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!highlightId) return;
+
+
+    if (highlightAppliedRef.current === highlightId) return;
+
+    if (highlightId.startsWith('i-')) {
+      const instId = parseInt(highlightId.slice(2), 10);
+      if (!isNaN(instId) && customers.length > 0) {
+        const targetCustomer = customers.find(c => c.installments.some(i => i.id === instId));
+        if (targetCustomer?.id) {
+          setExpandedCustomers(prev => {
+            const next = new Set<number>(prev);
+            next.add(targetCustomer.id!);
+            return next;
+          });
+          highlightAppliedRef.current = highlightId;
+          setTimeout(() => {
+            const el = document.getElementById(`installment-${instId}`);
+            if (el) {
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              el.classList.add('bg-muted/100');
+              setTimeout(() => {
+                el.classList.remove('bg-muted/50');
+              }, 3000);
+            }
+          }, 200);
+        }
+      }
+      return;
+    }
+
+
+
+    const customerId = parseInt(highlightId, 10);
+    if (!isNaN(customerId)) {
+      setExpandedCustomers(prev => {
+        const newSet = new Set<number>();
+        prev.forEach(id => newSet.add(id));
+        newSet.add(customerId);
+        return newSet;
+      });
+
+
+      highlightAppliedRef.current = highlightId;
+    }
+  }, [highlightId, customers]);
+
+
+
+  const toggleCustomerExpansion = (customerId: number) => {
+    setExpandedCustomers(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(customerId)) {
+        newSet.delete(customerId);
+      } else {
+        newSet.add(customerId);
+      }
+      return newSet;
+    });
+  };
+
+  const handleMarkAsPaid = async (installment: Installment) => {
+    try {
+      // Validación: pagar en orden (no permitir marcar cuotas futuras si hay anteriores pendientes)
+      const customerWithSale = customers.find(c => c.installments.some(i => i.id === installment.id));
+      const saleInstallments = customerWithSale
+        ? customerWithSale.installments.filter(i => i.sale_id === installment.sale_id)
+        : [];
+      const isSequential = validateSequentialPayment(saleInstallments, installment.installment_number || 0);
+      if (!isSequential) {
+        toast.warning('Tenés que pagar las cuotas en orden. Hay cuotas anteriores pendientes.');
+        return;
+      }
+
+      const isoLocal = installment.due_date;
+
+      // 1. Send command to DB
+      await window.electronAPI.database.installments.markAsPaid(installment.id!, isoLocal);
+
+      // 2. FORCE a full reload from the DB (Source of Truth)
+      await loadInstallmentData();
+
+      // 3. Trigger parent refresh if needed
+      onRefresh?.();
+
+      toast.success('Cuota marcada como pagada');
+    } catch (error) {
+      console.error('Error marking installment as paid:', error);
+      toast.error('Error al marcar la cuota como pagada');
+    }
+  };
+
+
+  const buildWhatsAppMessageForCustomer = (c: CustomerWithInstallments): string => {
+    const normalize = (s: string) => String(s || '').trim();
+    const next = [...(c.installments || [])]
+      .filter(inst => inst.status !== 'paid')
+      .sort((a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime())[0];
+    const formatAmt = (n: number) => new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(n);
+    const amountStr = next ? formatAmt(typeof next.balance === 'number' ? next.balance : next.amount) : formatAmt(c.totalOwed || 0);
+
+    let dueLine: string | undefined;
+    if (next?.due_date) {
+      const dueMs = new Date(next.due_date).getTime();
+      const nowMs = Date.now();
+      const dayMs = 24 * 60 * 60 * 1000;
+      const days = Math.max(0, Math.floor(Math.abs(dueMs - nowMs) / dayMs));
+      const dueDateStr = new Date(next.due_date).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' });
+      dueLine = (dueMs < nowMs)
+        ? `La cuota venció el ${dueDateStr} (hace ${days} días).`
+        : `La cuota vence el ${dueDateStr} (en ${days} días).`;
+    }
+
+    const greeting = c.name ? `Hola ${normalize(c.name)}, que tal?` : 'Hola, que tal?';
+    const lines = [
+      `${greeting}`,
+      'Te escribo para informarte sobre tu cuota.',
+      dueLine,
+      'Detalle:',
+      `*Importe de la cuota: ${amountStr}*`,
+      `CVU para depósito: `,
+      'Por favor, enviá el comprobante por este chat para acreditar el pago.',
+      'Gracias.',
+    ].filter(Boolean).join('\n');
+
+    return lines;
+  };
+
+
+
+  const buildWhatsAppMessageForContact = (c: CustomerWithInstallments): string => {
+    const normalize = (s: string) => String(s || '').trim();
+    const next = [...(c.installments || [])]
+      .filter(inst => inst.status !== 'paid')
+      .sort((a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime())[0];
+    const formatAmt = (n: number) => new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(n);
+    const amountStr = next ? formatAmt(typeof next.balance === 'number' ? next.balance : next.amount) : formatAmt(c.totalOwed || 0);
+
+    let dueLine: string | undefined;
+    if (next?.due_date) {
+      const dueMs = new Date(next.due_date).getTime();
+      const nowMs = Date.now();
+      const dayMs = 24 * 60 * 60 * 1000;
+      const days = Math.max(0, Math.floor(Math.abs(dueMs - nowMs) / dayMs));
+      const dueDateStr = new Date(next.due_date).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' });
+      dueLine = (dueMs < nowMs)
+        ? `La cuota venció el ${dueDateStr} (hace ${days} días).`
+        : `La cuota vence el ${dueDateStr} (en ${days} días).`;
+    }
+
+    const customerName = c.name ? normalize(c.name) : 'el cliente';
+    const lines = [
+      `Hola, ¿qué tal? Te escribo por parte de ${customerName}.`,
+      'Tiene una cuota pendiente.',
+      dueLine,
+      'Detalle:',
+      `*Importe de la cuota: ${amountStr}*`,
+      `CVU para depósito: `,
+      '¿Será que podés avisarle, por favor? Muchas gracias.',
+    ].filter(Boolean).join('\n');
+
+    return lines;
+  };
+
+  const openWhatsApp = async (customer: CustomerWithInstallments, num: string, useAlternate?: boolean) => {
+    const digits = (num || '').replace(/\D/g, '');
+    if (!digits) return;
+    const body = useAlternate ? buildWhatsAppMessageForContact(customer) : buildWhatsAppMessageForCustomer(customer);
+    const text = encodeURIComponent(body);
+    const nativeUrl = `whatsapp://send?phone=+54${digits}&text=${text}`;
+    const webUrl = `https://wa.me/+54${digits}?text=${text}`;
+    // Primero intentamos abrir la app nativa vía protocolo; si falla, hacemos fallback a la web
+    try {
+      const okNative = await (window as any)?.electronAPI?.openExternal?.(nativeUrl);
+      if (okNative === false) throw new Error('openExternal whatsapp:// returned false');
+    } catch {
+      try {
+        const okWeb = await (window as any)?.electronAPI?.openExternal?.(webUrl);
+        if (okWeb === false) throw new Error('openExternal wa.me returned false');
+      } catch {
+        const a = document.createElement('a');
+        a.href = webUrl;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+    }
+  };
+
+
+  const handleRevertPayment = async (installment: Installment) => {
+    try {
+      const payments = await window.electronAPI.database.payments.getBySale(installment.sale_id);
+      const installmentPayments = payments.filter(p => p.installment_id === installment.id && p.status === 'completed');
+
+      if (installmentPayments.length === 0) {
+        console.error('No completed payments found for this installment');
+        toast.warning('No se encontraron pagos completados para revertir');
+        return;
+      }
+
+      const latestPayment = installmentPayments.sort((a, b) =>
+        new Date(b.transaction_date).getTime() - new Date(a.transaction_date).getTime()
+      )[0];
+
+      await window.electronAPI.database.installments.revertPayment(
+        installment.id!,
+        latestPayment.id!
+      );
+
+      await loadInstallmentData();
+      onRefresh?.();
+      toast.success('Pago revertido correctamente');
+    } catch (error) {
+      console.error('Error reverting payment:', error);
+      toast.error('Error revirtiendo el último pago');
+    }
+  };
+
+  const handleDeleteCustomer = (customer: CustomerWithInstallments) => {
+    setDeleteCustomer(customer);
+  };
+
+  const handleDeleteSale = (sale: Sale) => {
+    setDeleteSale(sale);
+  };
+
+  const confirmDeleteCustomer = async () => {
+    if (!deleteCustomer?.id) return;
+
+    try {
+      for (const installment of deleteCustomer.installments) {
+        if (installment.id) {
+          await window.electronAPI.database.installments.delete(installment.id);
+        }
+      }
+
+      for (const sale of deleteCustomer.sales) {
+        if (sale.id) {
+          await window.electronAPI.database.sales.delete(sale.id);
+        }
+      }
+
+      await window.electronAPI.database.customers.delete(deleteCustomer.id);
+
+      await loadInstallmentData();
+      onRefresh?.();
+      toast.success('Cliente eliminado correctamente');
+    } catch (error) {
+      console.error('Error deleting customer:', error);
+      toast.error('Error eliminando el cliente');
+    } finally {
+      setDeleteCustomer(null);
+    }
+  };
+
+  const confirmDeleteSale = async () => {
+    if (!deleteSale?.id) return;
+
+    try {
+      const saleId = deleteSale.id;
+
+      const targetCustomer = customers.find(c => c.sales.some(s => s.id === saleId));
+
+      if (targetCustomer) {
+        const saleInstalls = targetCustomer.installments.filter(inst => inst.sale_id === saleId);
+        for (const inst of saleInstalls) {
+          if (inst.id) {
+            await window.electronAPI.database.installments.delete(inst.id);
+          }
+        }
+      }
+
+      await window.electronAPI.database.sales.delete(saleId);
+
+      await loadInstallmentData();
+      onRefresh?.();
+      toast.success('Venta eliminada correctamente');
+    } catch (error) {
+      console.error('Error deleting sale:', error);
+      toast.error('Error eliminando la venta');
+    } finally {
+      setDeleteSale(null);
+    }
+  };
+
+
+
+  const handleCopyValue = async (value: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success(`${label} copiado al portapapeles.`);
+    } catch (err) {
+      console.error('Error copying value:', err);
+      toast.error(`No se pudo copiar ${label}.`);
+    }
+  };
+
+  const filteredAndSortedCustomers = useMemo(() => {
+    let filtered = customers.filter(customer => {
+      const matchesSearch = customer.name.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+        customer.phone?.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
+        customer.secondary_phone?.toLowerCase().includes(debouncedSearch.toLowerCase());
+
+      if (!matchesSearch) return false;
+
+
+
+      if (customer.installments.length > 0 && customer.installments.every(i => i.status === 'paid')) {
+        return false;
+      }
+
+
+
+
+      if (periodFilter !== 'all') {
+        const hasPeriod = customer.sales.some(s => s.payment_type === 'installments' && s.period_type === periodFilter);
+        if (!hasPeriod) return false;
+      }
+
+      if (statusFilter === 'all') return true;
+
+      const hasMatchingInstallments = customer.installments.some(installment => {
+        const isOverdue = new Date(installment.due_date) < new Date() && installment.status !== 'paid';
+
+        switch (statusFilter) {
+          case 'pending':
+            return installment.status === 'pending';
+          case 'paid':
+            return installment.status === 'paid';
+          case 'overdue':
+            return isOverdue || installment.status === 'overdue';
+          default:
+            return true;
+        }
+      });
+
+      return hasMatchingInstallments;
+    });
+
+    filtered.sort((a, b) => {
+      let aValue: any, bValue: any;
+
+      switch (sortBy) {
+        case 'customer':
+          aValue = a.name.toLowerCase();
+          bValue = b.name.toLowerCase();
+          break;
+        case 'amount':
+          aValue = a.totalOwed;
+          bValue = b.totalOwed;
+          break;
+        case 'dueDate':
+          aValue = a.nextPaymentDate ? new Date(a.nextPaymentDate) : new Date('9999-12-31');
+          bValue = b.nextPaymentDate ? new Date(b.nextPaymentDate) : new Date('9999-12-31');
+          break;
+        case 'status':
+          aValue = a.overdueAmount > 0 ? 0 : 1;
+          bValue = b.overdueAmount > 0 ? 0 : 1;
+          break;
+        default:
+          aValue = a.name.toLowerCase();
+          bValue = b.name.toLowerCase();
+      }
+
+      if (sortOrder === 'asc') {
+        return aValue < bValue ? -1 : aValue > bValue ? 1 : 0;
+      } else {
+        return aValue > bValue ? -1 : aValue < bValue ? 1 : 0;
+      }
+    });
+
+    return filtered;
+  }, [customers, searchTerm, statusFilter, sortBy, sortOrder, periodFilter]);
+
+
+
+  const [clientDate, setClientDate] = useState<Date | null>(null);
+  useEffect(() => {
+
+
+    setClientDate(new Date());
+  }, []);
+
+
+  const formatCurrency = (amount: number) => {
+    return new Intl.NumberFormat('es-AR', {
+      style: 'currency',
+      currency: 'ARS'
+    }).format(amount);
+  };
+
+  const toISODateLocal = (d: Date) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+
+  const formatDate = (dateString: string) => {
+    if (!dateString) return '-';
+    try {
+      // Use local parsing to avoid TZ shifts
+      const [y, m, d] = dateString.split('-').map(Number);
+      if (y && m && d) {
+        return format(new Date(y, m - 1, d), 'dd MMM yyyy', { locale: es });
+      }
+      return format(parseISO(dateString), 'dd MMM yyyy', { locale: es });
+    } catch (e) {
+      return dateString;
+    }
+  };
+
+  const setPaymentDateForInstallment = (instId: number, date?: Date) => {
+    setSelectedPaymentDates(prev => {
+      const next = new Map(prev);
+      if (date) next.set(instId, toISODateLocal(date)); else next.delete(instId);
+      return next;
+    });
+  };
+
+
+
+  const openPaymentDialog = (inst: Installment) => {
+    setPaymentInstallment(inst);
+    setPaymentDialogOpen(true);
+  };
+
+  const handleSelectDate = async (inst: Installment, date?: Date) => {
+    try {
+      if (!date || isNaN(date.getTime())) {
+        toast.error('Fecha inválida. Por favor seleccioná una fecha válida.');
+        return;
+      }
+
+      const iso = toISODateLocal(date);
+      const payload: Partial<Installment> = {};
+
+      if (inst.status === 'paid') {
+        payload.paid_date = iso;
+      } else {
+        payload.due_date = iso;
+      }
+
+      await window.electronAPI.database.installments.update(inst.id!, payload);
+
+      // Force reload to get single source of truth
+      await loadInstallmentData();
+      onRefresh?.();
+
+      setOpenDatePickerId(null);
+      toast.success('Fecha actualizada correctamente');
+    } catch (e) {
+      console.error('Error al actualizar la fecha de la cuota', e);
+      toast.error('No se pudo actualizar la fecha. Inténtalo nuevamente.');
+    }
+  };
+
+
+
+
+
+  const inferPeriodType = (installments: Installment[]): 'monthly' | 'weekly' | 'biweekly' => {
+    if (!installments || installments.length === 0) return 'monthly';
+    const uniqueDays = new Set(installments.map(i => new Date(i.due_date).getDate()));
+    const isOneAndFifteenOnly = Array.from(uniqueDays).every(d => d === 1 || d === 15);
+    if (isOneAndFifteenOnly) return 'biweekly';
+    const sorted = [...installments].sort((a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime());
+    const deltas = sorted.slice(1).map((i, idx) => (new Date(i.due_date).getTime() - new Date(sorted[idx].due_date).getTime()) / (1000 * 60 * 60 * 24));
+    const avgDelta = deltas.length ? deltas.reduce((a, b) => a + b, 0) / deltas.length : 30;
+    return avgDelta <= 10 ? 'weekly' : 'monthly';
+  };
+
+  const getInstallmentStatusBadge = (installment: Installment) => {
+    const isOverdue = new Date(installment.due_date) < new Date() && installment.status !== 'paid';
+
+    if (installment.status === 'paid') {
+      return <Badge className="bg-green-500/10 text-green-600 hover:bg-green-500/20 border-green-500/20">Pagada</Badge>;
+    } else if (isOverdue || installment.status === 'overdue') {
+      return <Badge className="bg-red-500/10 text-red-600 hover:bg-red-500/20 border-red-500/20">Vencida</Badge>;
+    } else {
+      return <Badge className="bg-primary/10 text-primary hover:bg-primary/20 border-primary/20">Pendiente</Badge>;
+    }
+  };
+
+  const getCustomerStatusIndicator = (customer: CustomerWithInstallments) => {
+    const today = new Date();
+    const currentYear = today.getFullYear();
+    const currentMonth = today.getMonth();
+
+
+
+    const hasOverdue = customer.installments.some(inst =>
+      new Date(inst.due_date) < today && inst.status !== 'paid'
+    );
+    if (hasOverdue) {
+      return <div className="w-3 h-3 bg-red-500 rounded-full" title="Tiene pagos vencidos" />;
+    }
+
+
+
+    const currentMonthInstallments = customer.installments.filter(inst => {
+      const d = new Date(inst.due_date);
+      return d.getFullYear() === currentYear && d.getMonth() === currentMonth;
+    });
+
+
+
+    if (currentMonthInstallments.length > 0) {
+      const anyUnpaidThisMonth = currentMonthInstallments.some(inst => inst.status !== 'paid');
+      if (anyUnpaidThisMonth) {
+        return <div className="w-3 h-3 bg-yellow-500 rounded-full" title="Cuota del mes pendiente" />;
+      } else {
+        return <div className="w-3 h-3 bg-green-500 rounded-full" title="Cuota del mes paga" />;
+      }
+    }
+
+
+
+
+
+    const allPaid = customer.installments.length > 0 && customer.installments.every(inst => inst.status === 'paid');
+    if (allPaid) {
+      return <div className="w-3 h-3 bg-green-500 rounded-full" title="Plan de cuotas completado" />;
+    }
+
+    return <div className="w-3 h-3 bg-green-500 rounded-full" title="Sin cuota este mes" />;
+  };
+
+  const stats = useMemo(() => {
+    const allInstallments = customers.flatMap(c => c.installments);
+    return {
+      totalCustomers: customers.length,
+      totalInstallments: allInstallments.length,
+      pendingInstallments: allInstallments.filter(i => i.status === 'pending').length,
+      overdueInstallments: allInstallments.filter(i => {
+        const isOverdue = new Date(i.due_date) < new Date() && i.status !== 'paid';
+        return isOverdue || i.status === 'overdue';
+      }).length,
+      totalOwed: allInstallments.filter(i => i.status !== 'paid').reduce((sum, i) => sum + i.balance, 0),
+      overdueAmount: customers.reduce((sum, c) => sum + c.overdueAmount, 0)
+    };
+  }, [customers]);
+
+  if (!isElectron) {
+    return (
+      <Card>
+        <CardContent className="flex items-center justify-center py-12">
+          <div className="text-center">
+            <CreditCard className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+            <h3 className="text-lg font-semibold mb-2">Electron Requerido</h3>
+            <p className="text-muted-foreground">
+              La gestión de cuotas solo está disponible en la aplicación de escritorio.
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <div className="space-y-6 overflow-y-visible">
+
+      {/* Statistics Cards */}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <Card>
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm font-medium">Clientes con Cuotas</CardTitle>
+              <User className="h-4 w-4 text-muted-foreground" />
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{stats.totalCustomers}</div>
+            <div className="flex items-center text-xs text-muted-foreground">
+              <User className="h-3 w-3 mr-1 text-blue-500" />
+              Clientes con planes de pago activos
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm font-medium">Total Adeudado</CardTitle>
+              <DollarSign className="h-4 w-4 text-muted-foreground" />
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{formatCurrency(stats.totalOwed)}</div>
+            <div className="flex items-center text-xs text-muted-foreground">
+              <DollarSign className="h-3 w-3 mr-1 text-green-500" />
+              Monto total pendiente de cobro
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm font-medium">Cuotas Vencidas</CardTitle>
+              <AlertTriangle className="h-4 w-4 text-muted-foreground" />
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-red-600">{stats.overdueInstallments}</div>
+            <div className="flex items-center text-xs text-muted-foreground">
+              <AlertTriangle className="h-3 w-3 mr-1 text-red-500" />
+              {formatCurrency(stats.overdueAmount)} vencido
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm font-medium">Cuotas Pendientes</CardTitle>
+              <Clock className="h-4 w-4 text-muted-foreground" />
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{stats.pendingInstallments}</div>
+            <div className="flex items-center text-xs text-muted-foreground">
+              <Clock className="h-3 w-3 mr-1 text-blue-500" />
+              Cuotas por vencer próximamente
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Filters and Search */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Buscar clientes..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="pl-8 w-44 xl:w-64"
+                />
+              </div>
+              <Select value={statusFilter} onValueChange={(value: StatusFilter) => setStatusFilter(value)}>
+                <SelectTrigger className="w-52">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Todos los estados</SelectItem>
+                  <SelectItem value="pending">Pendientes</SelectItem>
+                  <SelectItem value="overdue">Vencidas</SelectItem>
+                  <SelectItem value="paid">Pagadas</SelectItem>
+                </SelectContent>
+              </Select>
+              <Select value={sortBy} onValueChange={(value: SortBy) => setSortBy(value)}>
+                <SelectTrigger className="w-40">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="customer">Cliente</SelectItem>
+                  <SelectItem value="amount">Monto</SelectItem>
+                  <SelectItem value="dueDate">Próximo vencimiento</SelectItem>
+                  <SelectItem value="status">Estado</SelectItem>
+                </SelectContent>
+              </Select>
+              <Select value={periodFilter} onValueChange={(value) => setPeriodFilter(value as 'all' | 'monthly' | 'weekly' | 'biweekly')}>
+                <SelectTrigger className="w-44">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Todos los periodos</SelectItem>
+                  <SelectItem value="monthly">Mensual</SelectItem>
+                  <SelectItem value="biweekly">Quincenal (1 y 15)</SelectItem>
+                  <SelectItem value="weekly">Semanal</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div className="space-y-4">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <div key={i} className="border rounded-lg p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-3">
+                      <Skeleton className="w-8 h-8 rounded-full" />
+                      <div>
+                        <Skeleton className="h-5 w-32 mb-1" />
+                        <Skeleton className="h-4 w-24" />
+                      </div>
+                    </div>
+                    <Skeleton className="h-6 w-20" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : filteredAndSortedCustomers.length === 0 ? (
+            <div className="text-center py-12">
+              <User className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+              <h3 className="text-lg font-semibold mb-2">No se encontraron clientes</h3>
+              <p className="text-muted-foreground">
+                {searchTerm ? 'No hay clientes que coincidan con la búsqueda.' : 'No hay clientes con planes de cuotas activos.'}
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {filteredAndSortedCustomers.map((customer) => (
+                <Collapsible
+                  key={customer.id}
+                  open={expandedCustomers.has(customer.id!)}
+                  onOpenChange={() => toggleCustomerExpansion(customer.id!)}
+                >
+                  <Card className={cn(
+                    "transition-all duration-200 hover:shadow-md",
+                    customer.overdueAmount > 0 && "border-l-4 border-l-red-800",
+
+                    highlightId === customer.id?.toString() && "bg-muted/50"
+                  )}>
+                    <CollapsibleTrigger asChild>
+                      <CardHeader className="cursor-pointer hover:bg-muted/50 transition-colors">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-4">
+                            <div className="flex items-center gap-2">
+                              {expandedCustomers.has(customer.id!) ? (
+                                <ChevronDown className="h-4 w-4" />
+                              ) : (
+                                <ChevronRight className="h-4 w-4" />
+                              )}
+                              {getCustomerStatusIndicator(customer)}
+                            </div>
+
+                            <div className="flex-1">
+                              <div className="flex items-center gap-2">
+                                {customer.name}
+                                {customer.overdueAmount > 0 && (
+                                  <Badge variant="destructive" className="text-xs">
+                                    {customer.installments.filter(i => {
+                                      const isOverdue = new Date(i.due_date) < new Date() && i.status !== 'paid';
+                                      return isOverdue || i.status === 'overdue';
+                                    }).length} vencidas
+                                  </Badge>
+                                )}
+                                <HoverCard openDelay={1000} closeDelay={100}>
+                                  <HoverCardTrigger asChild>
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      className="h-10 w-10 p-0"
+                                      onClick={(e) => { e.stopPropagation(); openWhatsApp(customer, customer.phone!); }}
+                                    >
+                                      <MessageCircle className="h-5 w-5" />
+                                    </Button>
+                                  </HoverCardTrigger>
+                                  <HoverCardContent className="w-[240px] p-2">
+                                    <div className="flex text-sm flex-col gap-2">
+                                      Segundo contacto:
+                                      {customer.secondary_phone && (
+                                        <Button
+                                          size="sm"
+                                          variant="outline"
+                                          className="justify-start"
+                                          onClick={(e) => { e.stopPropagation(); openWhatsApp(customer, customer.secondary_phone!, true); }}
+                                          title="WhatsApp (secundario)"
+                                        >
+                                          <Phone className="h-3 w-3 mr-2" />
+                                          {customer.secondary_phone}
+                                        </Button>
+                                      )}
+                                    </div>
+                                  </HoverCardContent>
+                                </HoverCard>
+                              </div>
+                              <div className="flex items-center gap-4 text-sm text-muted-foreground mt-1">
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-6 text-right">
+                            <div>
+                              <div className="text-sm font-medium">Total Adeudado</div>
+                              <div className="flex items-center gap-2">
+                                <div className="text-lg font-bold">{formatCurrency(customer.totalOwed)}</div>
+                              </div>
+                            </div>
+
+                            <div className="text-sm text-muted-foreground">
+                              {customer.installments.length} cuotas
+                            </div>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => handleDeleteCustomer(customer)}
+                              className="h-12 w-12 p-0 text-red-600 hover:text-red-700"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </div>
+                      </CardHeader>
+                    </CollapsibleTrigger>
+
+                    <CollapsibleContent>
+                      <CardContent className="pt-0">
+                        <div className="border-t pt-4">
+                          {/* Group installments by sale */}
+                          {customer.sales.map((sale) => {
+                            const saleInstallments = customer.installments
+                              .filter(inst => inst.sale_id === sale.id)
+                              .sort((a, b) => (a.original_installment_number ?? a.installment_number) - (b.original_installment_number ?? b.installment_number));
+
+                            return (
+                              <Collapsible
+                                key={sale.id}
+                                open={expandedSales.has(sale.id!)}
+                                onOpenChange={(open) => {
+                                  setExpandedSales(prev => {
+                                    const next = new Set(prev);
+                                    if (open) next.add(sale.id!); else next.delete(sale.id!);
+                                    return next;
+                                  });
+                                }}
+                              >
+                                <Card className="mb-3 bg-muted/20">
+                                  <CollapsibleTrigger asChild>
+                                    <div className="cursor-pointer p-3 hover:bg-muted/50 rounded-md flex items-center justify-between">
+                                      <div className="flex items-center gap-2">
+                                        {expandedSales.has(sale.id!) ? (
+                                          <ChevronDown className="h-4 w-4" />
+                                        ) : (
+                                          <ChevronRight className="h-4 w-4" />
+                                        )}
+                                        {(() => {
+                                          const items = sale.items ?? [];
+                                          if (items.length === 0) {
+                                            return <span className="font-medium">Venta #{sale.sale_number}</span>;
+                                          }
+                                          const firstProduct = items[0];
+                                          const hasMultipleItems = items.length > 1;
+                                          return (
+                                            <div className="flex items-center gap-2">
+                                              <div className="w-6 h-6 bg-primary/10 rounded-full flex items-center justify-center">
+                                                <Package className="w-3 h-3 text-primary" />
+                                              </div>
+                                              <span className="font-medium">{firstProduct.product_name}</span>
+                                              {hasMultipleItems && (
+                                                <Popover>
+                                                  <PopoverTrigger asChild>
+                                                    <Button onClick={(e) => e.stopPropagation()} variant="outline" size="sm" className="h-6 px-2 text-xs z-10">
+                                                      +{items.length - 1} más
+                                                    </Button>
+                                                  </PopoverTrigger>
+                                                  <PopoverContent className="w-80" align="start">
+                                                    <div className="space-y-2">
+                                                      <h4 className="font-medium text-sm">Productos en esta venta:</h4>
+                                                      <div className="space-y-1 max-h-48 overflow-y-auto">
+                                                        {items.map((item, index) => (
+                                                          <div key={index} className="flex items-center justify-between text-sm p-2 bg-muted/50 rounded">
+                                                            <div className="flex items-center gap-2">
+                                                              <Package className="w-3 h-3 text-muted-foreground" />
+                                                              <span>{item.product_name}</span>
+                                                            </div>
+                                                            <div className="text-muted-foreground">x{item.quantity}</div>
+                                                          </div>
+                                                        ))}
+                                                      </div>
+                                                    </div>
+                                                  </PopoverContent>
+                                                </Popover>
+                                              )}
+                                              {/* Sale-level period/window badges for clarity */}
+                                              {(() => {
+                                                const salePeriod = sale.period_type ?? inferPeriodType(saleInstallments);
+                                                return (
+                                                  <Badge variant="secondary" className="text-xs">
+                                                    {salePeriod === 'monthly' ? 'Mensual' : salePeriod === 'biweekly' ? 'Quincenal' : 'Semanal'}
+                                                  </Badge>
+                                                );
+                                              })()}
+                                              {(() => {
+                                                const salePeriod = sale.period_type ?? inferPeriodType(saleInstallments);
+                                                return null;
+                                              })()}
+                                            </div>
+                                          );
+                                        })()}
+                                        {saleInstallments.length > 0 && (
+                                          <Badge variant="outline" className="text-xs">
+                                            {saleInstallments.length} cuotas
+                                          </Badge>
+                                        )}
+                                        {sale.payment_status === 'overdue' && (
+                                          <Badge variant="destructive" className="text-xs">Pago Vencido</Badge>
+                                        )}
+                                      </div>
+                                      <div className="flex items-center gap-2">
+                                        <div className="text-sm text-muted-foreground">
+                                          {sale.date ? formatDate(sale.date) : ''}
+                                        </div>
+                                        <Button
+                                          size="sm"
+                                          variant="ghost"
+                                          className="h-8 w-8 p-0 text-red-600 hover:text-red-700"
+                                          onClick={(e) => { e.stopPropagation(); handleDeleteSale(sale); }}
+                                          title="Eliminar venta"
+                                        >
+                                          <Trash2 className="h-4 w-4" />
+                                          <span className="sr-only">Eliminar venta</span>
+                                        </Button>
+                                      </div>
+                                    </div>
+                                  </CollapsibleTrigger>
+                                  <CollapsibleContent>
+                                    <div className="pt-2">
+                                      {saleInstallments.length === 0 ? (
+                                        <div className="text-sm text-muted-foreground p-2">Sin cuotas para esta venta.</div>
+                                      ) : (
+                                        <Table>
+                                          <TableHeader>
+                                            <TableRow>
+                                              <TableHead>Cuota</TableHead>
+                                              <TableHead>Fecha</TableHead>
+                                              <TableHead>Monto</TableHead>
+                                              <TableHead>Pagado</TableHead>
+                                              <TableHead>Balance</TableHead>
+                                              <TableHead>Estado</TableHead>
+                                              <TableHead className="w-[100px]">Acciones</TableHead>
+                                            </TableRow>
+                                          </TableHeader>
+                                          <TableBody>
+                                            {saleInstallments.map((installment) => {
+                                              const displayDate = (installment.status === 'paid' && installment.paid_date)
+                                                ? installment.paid_date
+                                                : installment.due_date;
+                                              const isOverdue = new Date(installment.due_date) < new Date() && installment.status !== 'paid';
+                                              return (
+                                                <TableRow
+                                                  key={installment.id}
+                                                  id={`installment-${installment.id}`}
+                                                  className={cn(
+                                                    isOverdue && "bg-red-950",
+                                                    installment.status === 'paid' && "bg-white/5"
+                                                  )}
+                                                >
+                                                  <TableCell className="font-medium">
+                                                    <div className="flex items-center gap-2">
+                                                      #{installment.installment_number}
+                                                      {installment.notes === 'Pago adelantado' && (
+                                                        <Badge variant="outline" className="text-xs text-white">
+                                                          Adelantado
+                                                        </Badge>
+                                                      )}
+                                                    </div>
+                                                  </TableCell>
+                                                  <TableCell className="group">
+                                                    <div className={cn(
+                                                      "text-sm relative",
+                                                      isOverdue && "text-red-500 font-semibold"
+                                                    )}>
+                                                      <Popover
+                                                        open={openDatePickerId === installment.id}
+                                                        onOpenChange={(open) => setOpenDatePickerId(open ? installment.id! : null)}
+                                                      >
+                                                        <PopoverTrigger asChild>
+                                                          <button
+                                                            className="flex items-center gap-2 px-2 py-1 -ml-2 rounded-md hover:bg-muted-foreground/10 transition-all duration-200 group-hover:ring-1 group-hover:ring-primary/20 w-fit"
+                                                            title="Clic para cambiar la fecha"
+                                                          >
+                                                            <LucideCalendar className="w-3.5 h-3.5 opacity-60 group-hover:opacity-100 transition-opacity" />
+                                                            <span className="truncate max-w-[140px] font-medium border-b border-transparent group-hover:border-primary/30">
+                                                              {formatDate(displayDate)}
+                                                            </span>
+                                                          </button>
+                                                        </PopoverTrigger>
+                                                        <PopoverContent className="w-auto p-0" align="start">
+                                                          <div className="p-3 border-b bg-muted/30">
+                                                            <div className="text-xs font-semibold">Editar {installment.status === 'paid' ? 'fecha de pago' : 'vencimiento'}</div>
+                                                            <div className="text-[10px] text-muted-foreground">La fecha se actualizará inmediatamente</div>
+                                                          </div>
+                                                          <Calendar
+                                                            mode="single"
+                                                            selected={new Date(displayDate + 'T12:00:00')}
+                                                            onSelect={(date) => handleSelectDate(installment, date)}
+                                                            initialFocus
+                                                            locale={es}
+                                                          />
+                                                        </PopoverContent>
+                                                      </Popover>
+                                                    </div>
+                                                  </TableCell>
+                                                  <TableCell>
+                                                    <div className="text-sm text-muted-foreground">
+                                                      {(() => {
+                                                        const salePeriod = sale.period_type ?? inferPeriodType(saleInstallments);
+                                                        if (salePeriod === 'monthly') {
+                                                          return `Mensual`;
+                                                        }
+                                                        return salePeriod === 'biweekly' ? 'Quincenal' : 'Semanal';
+                                                      })()}
+                                                    </div>
+                                                  </TableCell>
+                                                  <TableCell className="text-foreground font-medium">{formatCurrency(installment.amount)}</TableCell>
+                                                  <TableCell className="text-foreground/90">{formatCurrency(installment.paid_amount)}</TableCell>
+                                                  <TableCell>
+                                                    <span className={cn(
+                                                      "font-medium",
+                                                      installment.balance > 0 ? "text-red-600" : "text-green-600"
+                                                    )}>
+                                                      {formatCurrency(installment.balance)}
+                                                    </span>
+                                                  </TableCell>
+                                                  <TableCell>
+                                                    {getInstallmentStatusBadge(installment)}
+                                                  </TableCell>
+                                                  <TableCell>
+                                                    <div className="flex items-center gap-1">
+                                                      {installment.status !== 'paid' ? (
+                                                        <>
+                                                          <Button
+                                                            size="sm"
+                                                            variant="outline"
+                                                            onClick={() => openPaymentDialog(installment)}
+                                                            className="h-7 px-2 text-xs"
+                                                          >
+                                                            <CheckCircle className="h-3 w-3 mr-1" />
+                                                            Registrar Pago
+                                                          </Button>
+                                                          <Button
+                                                            size="sm"
+                                                            variant="outline"
+                                                            onClick={() => handleMarkAsPaid(installment)}
+                                                            className="h-7 px-2 text-xs"
+                                                          >
+                                                            <CheckCircle className="h-3 w-3 mr-1" />
+                                                            Marcar Pagada
+                                                          </Button>
+
+                                                        </>
+                                                      ) : (
+                                                        <>
+                                                          <Button
+                                                            size="sm"
+                                                            variant="outline"
+                                                            onClick={() => handleRevertPayment(installment)}
+                                                            className="h-7 px-2 text-xs text-white/80 hover:text-white border-white hover:border-white"
+                                                          >
+                                                            <X className="h-3 w-3 mr-1" />
+                                                            Revertir
+                                                          </Button>
+                                                        </>
+                                                      )}
+                                                    </div>
+                                                  </TableCell>
+                                                </TableRow>
+                                              )
+                                            })}
+                                          </TableBody>
+                                        </Table>
+                                      )}
+                                    </div>
+                                  </CollapsibleContent>
+                                </Card>
+                              </Collapsible>
+                            );
+                          })
+                          }
+                        </div>
+                      </CardContent>
+                    </CollapsibleContent>
+                  </Card>
+                </Collapsible>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Modal removed as per request */}
+
+      <InstallmentPaymentDialog
+        open={paymentDialogOpen}
+        installment={paymentInstallment}
+        onOpenChange={(o) => setPaymentDialogOpen(o)}
+        onSuccess={async (updated) => {
+          try {
+            await loadInstallmentData();
+            onRefresh?.();
+          } catch (e) {
+            console.warn('Error post-payment reload:', e);
+          }
+        }}
+        initialPaymentDate={paymentInstallment ? selectedPaymentDates.get(paymentInstallment.id!) : undefined}
+      />
+
+
+
+      {/* Delete Sale Confirmation */}
+      <AlertDialog open={!!deleteSale} onOpenChange={() => setDeleteSale(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Eliminar Venta</AlertDialogTitle>
+            <AlertDialogDescription>
+              ¿Estás seguro de que deseas eliminar la venta #{deleteSale?.sale_number}?
+              Se eliminarán sus cuotas asociadas. Esta acción no se puede deshacer.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmDeleteSale} className="bg-red-600 hover:bg-red-700 text-white">
+              Eliminar Venta
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+        
+      {/* Delete Customer Confirmation */}
+      <AlertDialog open={!!deleteCustomer} onOpenChange={() => setDeleteCustomer(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Eliminar Cliente</AlertDialogTitle>
+            <AlertDialogDescription>
+              ¿Estás seguro de que deseas eliminar al cliente &quot;{deleteCustomer?.name}&quot; y todas sus ventas e instalments?
+            </AlertDialogDescription>
+            <div className="mt-2">
+              <p className="text-sm text-muted-foreground mb-2">Esta acción eliminará:</p>
+              <ul className="list-disc list-inside space-y-1 text-sm">
+                <li>{deleteCustomer?.sales.length} venta(s)</li>
+                <li>{deleteCustomer?.installments.length} cuota(s)</li>
+              </ul>
+            </div>
+            <AlertDialogDescription className="sr-only">
+              Confirmación de eliminación de cliente
+              Esta acción no se puede deshacer.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmDeleteCustomer} className="bg-red-600 hover:bg-red-700 text-white">
+              Eliminar Cliente
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+});
+
+InstallmentDashboard.displayName = 'InstallmentDashboard';
+
+
