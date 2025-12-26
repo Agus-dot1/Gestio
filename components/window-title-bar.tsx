@@ -44,7 +44,7 @@ export function WindowTitleBar() {
             >
                 <div className="flex items-center justify-center overflow-hidden w-fit h-fit rounded-sm">
                     <Image
-                        src={resolvedTheme === 'dark' ? "/logo-light.svg" : "/logo-dark.svg"}
+                        src={resolvedTheme === 'dark' ? "./logo-light.svg" : "./logo-dark.svg"}
                         alt="Logo"
                         width={14}
                         height={14}

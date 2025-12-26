@@ -7,7 +7,7 @@ const nextConfig = {
 
 
   output: 'export',
-  trailingSlash: true,
+  // Removed assetPrefix and trailingSlash for better Electron compatibility
   experimental: {
 
 

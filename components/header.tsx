@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { usePathname } from 'next/navigation';
 
 const routeMetadata: Record<string, { title: string; subtitle: string }> = {
-    '/': { title: 'Hola, bienvenido', subtitle: 'Resumen del sistema' },
+    '/': { title: 'Hola, bienvenido/a', subtitle: 'Resumen del sistema' },
     '/products': { title: 'Productos', subtitle: 'Control de inventario y catálogo' },
     '/customers': { title: 'Clientes', subtitle: 'Gestión de base de datos de clientes' },
     '/sales': { title: 'Ventas', subtitle: 'Registro y seguimiento de transacciones' },

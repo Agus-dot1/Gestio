@@ -36,7 +36,7 @@ export function CustomersColumnToggle({ columnVisibility, onColumnVisibilityChan
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm" className="ml-auto">
+        <Button variant="outline" size="sm" className="ml-auto rounded-xl">
           <Settings2 className="mr-2 h-4 w-4" />
           Columnas
         </Button>

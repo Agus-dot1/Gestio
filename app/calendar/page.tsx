@@ -34,6 +34,7 @@ import {
 } from 'lucide-react';
 import type { CalendarEvent, EventType, EventStatus } from '@/lib/calendar-types';
 import type { Sale } from '@/lib/database-operations';
+import { formatCurrency } from '@/config/locale';
 
 
 export default function CalendarPage() {
@@ -293,14 +294,6 @@ export default function CalendarPage() {
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, [isElectron, loading, lastRefresh, loadCalendarEvents]);
-
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('es-AR', {
-      style: 'currency',
-      currency: 'ARS',
-      minimumFractionDigits: 2
-    }).format(amount).replace('ARS', '$');
-  };
 
   const handleDateSelect = (date: Date) => {
     setSelectedDate(date);

@@ -1,21 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useToast } from '@/hooks/use-toast';
+import { usePersistedState } from '@/hooks/use-persisted-state';
+import { toast } from 'sonner';
 import { loadPersisted, subscribeNotifications } from '../controller';
 import { notificationsAdapter } from '../adapter';
 import type { NotificationItem } from '../../types';
 import { buildWhatsAppMessage } from '../utils';
 
 export function useNotificationsLogic(open: boolean) {
-    const { toast } = useToast();
     const [notifications, setNotifications] = useState<NotificationItem[]>([]);
     const [archived, setArchived] = useState<NotificationItem[]>([]);
     const [activeTab, setActiveTab] = useState<'all' | 'unread' | 'read' | 'archived'>('all');
-    const [snoozeUntil, setSnoozeUntil] = useState<number | null>(null);
-    const [visibleTypes, setVisibleTypes] = useState<{ alert: boolean; attention: boolean; info: boolean }>({
+    const [visibleTypes, setVisibleTypes] = usePersistedState<{ alert: boolean; attention: boolean; info: boolean }>('notifications:visibleTypes', {
         alert: true,
         attention: true,
         info: true
     });
+    const [snoozeUntil, setSnoozeUntil] = usePersistedState<number | null>('notifications:snoozeUntil', null);
     const [renderCount, setRenderCount] = useState(30);
 
     const pendingChangesRef = useRef<Map<number, { read: boolean; ts: number }>>(new Map());
@@ -23,24 +23,6 @@ export function useNotificationsLogic(open: boolean) {
     const suppressedKeysRef = useRef<Set<string>>(new Set());
     const loadedOnOpenRef = useRef<boolean>(false);
 
-    // Load preferences
-    useEffect(() => {
-        try {
-            const raw = window.localStorage.getItem('notifications:visibleTypes');
-            if (raw) setVisibleTypes(JSON.parse(raw));
-
-            const storedSnooze = window.localStorage.getItem('notifications:snoozeUntil');
-            if (storedSnooze) {
-                const ts = Number(storedSnooze);
-                if (!Number.isNaN(ts)) setSnoozeUntil(ts);
-            }
-        } catch { }
-    }, []);
-
-    // Save preferences
-    useEffect(() => {
-        localStorage.setItem('notifications:visibleTypes', JSON.stringify(visibleTypes));
-    }, [visibleTypes]);
 
     const filterSuppressed = useCallback((list: NotificationItem[]) => {
         const today = new Date().toDateString();
@@ -130,7 +112,7 @@ export function useNotificationsLogic(open: boolean) {
             if (isRead) await notificationsAdapter.markUnread(id);
             else await notificationsAdapter.markRead(id);
         } catch (e) {
-            toast({ title: 'Error', description: 'No se pudo cambiar el estado de lectura' });
+            toast.error('No se pudo cambiar el estado de lectura');
         }
     }, [toast]);
 
@@ -159,7 +141,7 @@ export function useNotificationsLogic(open: boolean) {
             const rows = await notificationsAdapter.listArchived(50);
             setArchived(rows || []);
         } catch (e) {
-            toast({ title: 'Error', description: 'No se pudo restaurar la notificación' });
+            toast.error('No se pudo restaurar la notificación');
         }
     }, [filterSuppressed, toast]);
 
@@ -169,7 +151,7 @@ export function useNotificationsLogic(open: boolean) {
             for (const id of ids) await notificationsAdapter.markRead(id);
             setNotifications(prev => prev.map(n => (!n.read_at ? { ...n, read_at: new Date().toISOString() } : n)));
         } catch (e) {
-            toast({ title: 'Error', description: 'No se pudieron marcar todas como leídas' });
+            toast.error('No se pudieron marcar todas como leídas');
         }
     }, [notifications, toast]);
 
@@ -188,22 +170,20 @@ export function useNotificationsLogic(open: boolean) {
             }
             await notificationsAdapter.clearAll();
             setNotifications([]);
-            toast({ title: 'Listo', description: 'Todas las notificaciones han sido eliminadas' });
+            toast.success('Todas las notificaciones han sido eliminadas');
         } catch (error) {
-            toast({ title: 'Error', description: 'No se pudieron eliminar las notificaciones' });
+            toast.error('No se pudieron eliminar las notificaciones');
         }
     }, [notifications, toast]);
 
     const snooze = useCallback((hours: number = 1) => {
         const until = Date.now() + hours * 60 * 60 * 1000;
         setSnoozeUntil(until);
-        localStorage.setItem('notifications:snoozeUntil', String(until));
-    }, []);
+    }, [setSnoozeUntil]);
 
     const clearSnooze = useCallback(() => {
         setSnoozeUntil(null);
-        localStorage.removeItem('notifications:snoozeUntil');
-    }, []);
+    }, [setSnoozeUntil]);
 
     const openWhatsAppForCustomer = useCallback(async (m: NotificationItem['meta']) => {
         if (!m) return;

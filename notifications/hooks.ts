@@ -1,23 +1,18 @@
 import { IPC_NOTIFICATIONS } from './constants'
 import { notificationOperations } from './repository'
 import { customerOperations, installmentOperations, productOperations, saleOperations } from '../lib/database-operations'
+import { formatCurrency } from '../config/locale'
 
 export function setupClientNotificationScheduler(getWindow: () => any, interval?: number) {
   const intervalMs = typeof interval === 'number' && interval > 0 ? interval : 5 * 60000
   let lastWeeklyPrecheckKeyEmitted: string | null = null
 
-  const formatCurrency = (value: number): string => {
-    try {
-      return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', maximumFractionDigits: 0 }).format(value)
-    } catch {
-      return `$ ${value}`
-    }
-  }
+
 
   function cleanupOrphans() {
     try {
       notificationOperations.dedupeActiveByMessageKey()
-    } catch {}
+    } catch { }
   }
 
   function emitBatchOrSingle(payloads: any[]) {
@@ -58,7 +53,7 @@ export function setupClientNotificationScheduler(getWindow: () => any, interval?
                 payloads.push({ id: nid, message: msg, type: 'alert', meta: { message_key: key, customerName: customer, due_at: inst.due_date ? new Date(inst.due_date).toISOString() : new Date().toISOString(), amount: inst.balance, ...(createdAt ? { created_at: createdAt } : {}) } })
               }
             }
-          } catch {}
+          } catch { }
         }
         emitBatchOrSingle(payloads)
       }
@@ -82,7 +77,7 @@ export function setupClientNotificationScheduler(getWindow: () => any, interval?
                 payloads.push({ id: nid, message: msg, type: 'attention', meta: { message_key: key, customerName: customer, due_at: new Date(inst.due_date).toISOString(), amount: inst.balance, ...(createdAt ? { created_at: createdAt } : {}) } })
               }
             }
-          } catch {}
+          } catch { }
         }
         emitBatchOrSingle(payloads)
       }
@@ -107,7 +102,7 @@ export function setupClientNotificationScheduler(getWindow: () => any, interval?
                 const cid = s.customer_id
                 const customer = s.customer_name || (typeof cid === 'number' ? customerOperations.getById(cid).name : undefined) || 'Cliente'
                 customers.push(customer)
-              } catch {}
+              } catch { }
             }
             if (customers.length > 0) {
               const cycleLabel = tDay === 1 ? '1 del mes' : '15 del mes'
@@ -118,25 +113,25 @@ export function setupClientNotificationScheduler(getWindow: () => any, interval?
               if (lastWeeklyPrecheckKeyEmitted === key) {
                 // Already processed this summary in the current app session
               } else {
-              const existsActive = notificationOperations.existsActiveWithKey(key)
-              const existsToday = notificationOperations.existsTodayWithKey(key)
-              if (!existsActive && !existsToday) {
-                if (!(suppressIfMuted && isMuted)) {
-                  const nid = notificationOperations.create(msg, 'reminder', key)
-                  const win = getWindow()
-                  if (win) {
-                    const latest = notificationOperations.getLatestByKey(key)
-                    const createdAt = latest?.created_at
-                    win.webContents.send(IPC_NOTIFICATIONS.event, { id: nid, message: msg, type: 'attention', meta: { message_key: key, customerName: customers[0], customerNames: customers.slice(0, 3), customerCount: customers.length, due_at: tomorrow.toISOString(), actionLabel: 'Revisar', route: '/sales?tab=installments', ...(createdAt ? { created_at: createdAt } : {}) } })
-                    lastWeeklyPrecheckKeyEmitted = key
+                const existsActive = notificationOperations.existsActiveWithKey(key)
+                const existsToday = notificationOperations.existsTodayWithKey(key)
+                if (!existsActive && !existsToday) {
+                  if (!(suppressIfMuted && isMuted)) {
+                    const nid = notificationOperations.create(msg, 'reminder', key)
+                    const win = getWindow()
+                    if (win) {
+                      const latest = notificationOperations.getLatestByKey(key)
+                      const createdAt = latest?.created_at
+                      win.webContents.send(IPC_NOTIFICATIONS.event, { id: nid, message: msg, type: 'attention', meta: { message_key: key, customerName: customers[0], customerNames: customers.slice(0, 3), customerCount: customers.length, due_at: tomorrow.toISOString(), actionLabel: 'Revisar', route: '/sales?tab=installments', ...(createdAt ? { created_at: createdAt } : {}) } })
+                      lastWeeklyPrecheckKeyEmitted = key
+                    }
                   }
                 }
-              }
               }
             }
           }
         }
-      } catch {}
+      } catch { }
 
       try {
         const retentionDays = parseInt(process.env.NOTIFICATIONS_RETENTION_DAYS || '90', 10)
@@ -146,8 +141,8 @@ export function setupClientNotificationScheduler(getWindow: () => any, interval?
             notificationOperations.purgeArchivedOlderThan(retentionDays)
           }
         }
-      } catch {}
-    } catch {}
+      } catch { }
+    } catch { }
   }
 
   tick()
@@ -185,17 +180,17 @@ export function checkLowStockAfterSaleHook(saleData: any, getWindow: () => any) 
               }
             }
           }
-        } catch {}
+        } catch { }
       }
     }
-  } catch {}
+  } catch { }
 }
 
 export function checkInstallmentForOverdueSingle(installmentId: number, getWindow: () => any) {
   try {
     const inst = installmentOperations.getById(installmentId) as any
     if (!inst || !inst.id || inst.balance <= 0) return
-    const isOverdueByDate = new Date(inst.due_date).getTime() < new Date().setHours(0,0,0,0)
+    const isOverdueByDate = new Date(inst.due_date).getTime() < new Date().setHours(0, 0, 0, 0)
     if (!isOverdueByDate) return
     const sale = (saleOperations as any).getById(inst.sale_id)
     const customerName = sale?.customer_name || (typeof sale?.customer_id === 'number' ? customerOperations.getById(sale.customer_id)?.name : undefined) || 'Cliente'
@@ -216,5 +211,5 @@ export function checkInstallmentForOverdueSingle(installmentId: number, getWindo
         }
       }
     }
-  } catch {}
+  } catch { }
 }

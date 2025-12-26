@@ -36,6 +36,7 @@ export interface ElectronAPI {
     sales: {
       getAll: () => InvokeResult<any[]>
       getPaginated: (page: number, pageSize: number, searchTerm: string) => InvokeResult<any>
+      getPageNumber: (saleId: number, pageSize: number, searchTerm: string) => InvokeResult<number>
 
       search: (searchTerm: string, limit: number) => InvokeResult<any[]>
       getById: (id: number) => InvokeResult<any>
@@ -54,6 +55,7 @@ export interface ElectronAPI {
       deleteAll: () => InvokeResult<void>
     }
     installments: {
+      getAll: () => InvokeResult<any[]>
       getBySale: (saleId: number) => InvokeResult<any[]>
       getOverdue: () => InvokeResult<any[]>
       getUpcoming: (limit: number) => InvokeResult<any[]>
@@ -89,6 +91,14 @@ export interface ElectronAPI {
       create: (event: any) => InvokeResult<any>
       update: (id: number, event: any) => InvokeResult<any>
       delete: (id: number) => InvokeResult<void>
+    }
+    invoices: {
+      create: (invoice: any) => InvokeResult<any>
+      update: (id: number, invoice: any) => InvokeResult<any>
+      delete: (id: number) => InvokeResult<void>
+      getBySaleId: (saleId: number) => InvokeResult<any>
+      getAllWithDetails: () => InvokeResult<any[]>
+      getNextInvoiceNumber: () => InvokeResult<string>
     }
     onChanged: (callback: (payload: any) => void) => () => void
   }

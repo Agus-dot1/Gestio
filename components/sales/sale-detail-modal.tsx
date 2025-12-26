@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -27,26 +28,30 @@ import {
   Copy,
   Phone,
   Mail,
-  MapPin
+  MapPin,
+  Search,
+  AlertCircle,
+  Receipt,
+  FileCheck
 } from 'lucide-react';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger
+} from '@/components/ui/tooltip';
 import { Skeleton } from '@/components/ui/skeleton';
-import type { Sale, Customer, SaleItem, Installment } from '@/lib/database-operations';
+import type { Sale, Customer, SaleItem, Installment, Invoice } from '@/lib/database-operations';
 import { cn } from '@/lib/utils';
+import { MessageCircle } from 'lucide-react';
+import { toast } from 'sonner';
+import { formatCurrency } from '@/config/locale';
 
 interface SaleDetailModalProps {
   sale: Sale | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onEdit?: (sale: Sale) => void;
-}
-
-function formatCurrency(amount: number): string {
-  return new Intl.NumberFormat('es-AR', {
-    style: 'currency',
-    currency: 'ARS',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
-  }).format(amount);
 }
 
 function formatDate(dateString: string): string {
@@ -74,20 +79,21 @@ function formatDateTime(dateString: string): string {
 }
 
 function getPaymentStatusBadge(status: Sale['payment_status']) {
-  const variants = {
-    paid: { variant: 'default' as const, label: 'Pagado', icon: CheckCircle, color: 'text-green-600' },
-    unpaid: { variant: 'destructive' as const, label: 'Pendiente', icon: XCircle, color: 'text-red-600' },
-    overdue: { variant: 'destructive' as const, label: 'Vencido', icon: AlertTriangle, color: 'text-orange-600' }
-  };
-  return variants[status] || variants.unpaid;
+  if (status === 'paid') {
+    return <Badge className="bg-green-500/10 text-green-600 hover:bg-green-500/20 border-green-500/20">Pagada</Badge>;
+  } else if (status === 'overdue') {
+    return <Badge className="bg-red-500/10 text-red-600 hover:bg-red-500/20 border-red-500/20">Vencida</Badge>;
+  } else {
+    return <Badge className="bg-primary/10 text-primary hover:bg-primary/20 border-primary/20">Pendiente</Badge>;
+  }
 }
 
 function getPaymentTypeBadge(type: Sale['payment_type']) {
-  const variants = {
-    cash: { variant: 'outline' as const, label: 'Al Contado' },
-    installments: { variant: 'default' as const, label: 'Cuotas' },
-  };
-  return variants[type] || variants.cash;
+  if (type === 'cash') {
+    return <Badge className="bg-blue-500/10 text-blue-600 hover:bg-blue-500/20 border-blue-500/20">Contado</Badge>;
+  } else {
+    return <Badge className="bg-purple-500/10 text-purple-600 hover:bg-purple-500/20 border-purple-500/20">Cuotas</Badge>;
+  }
 }
 
 function getPaymentMethodLabel(method: Sale['payment_method'] | string | undefined) {
@@ -100,11 +106,21 @@ function getPaymentMethodLabel(method: Sale['payment_method'] | string | undefin
 }
 
 function getStatusBadge(status: Sale['status']) {
-  const variants = {
-    pending: { variant: 'secondary' as const, label: 'Pendiente', color: 'text-yellow-600' },
-    completed: { variant: 'default' as const, label: 'Completada', color: 'text-green-600' }
-  };
-  return variants[status] || variants.pending;
+  if (status === 'completed') {
+    return <Badge className="bg-green-500/10 text-green-600 hover:bg-green-500/20 border-green-500/20">Completada</Badge>;
+  } else {
+    return <Badge className="bg-yellow-500/10 text-yellow-600 hover:bg-yellow-500/20 border-yellow-500/20">Pendiente</Badge>;
+  }
+}
+
+function getInstallmentStatusBadge(status: Installment['status'], isOverdue: boolean) {
+  if (status === 'paid') {
+    return <Badge className="bg-green-500/10 text-green-600 hover:bg-green-500/20 border-green-500/20">Pagada</Badge>;
+  } else if (isOverdue || status === 'overdue') {
+    return <Badge className="bg-red-500/10 text-red-600 hover:bg-red-500/20 border-red-500/20">Vencida</Badge>;
+  } else {
+    return <Badge className="bg-primary/10 text-primary hover:bg-primary/20 border-primary/20">Pendiente</Badge>;
+  }
 }
 
 
@@ -116,6 +132,7 @@ function getInstallmentStatusLabel(status: Installment['status']): string {
 }
 
 export function SaleDetailModal({ sale, open, onOpenChange, onEdit }: SaleDetailModalProps) {
+  const router = useRouter();
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [saleItems, setSaleItems] = useState<SaleItem[]>([]);
   const [installments, setInstallments] = useState<Installment[]>([]);
@@ -125,6 +142,8 @@ export function SaleDetailModal({ sale, open, onOpenChange, onEdit }: SaleDetail
   const [detailTransactions, setDetailTransactions] = useState<any[]>([]);
   const [detailInstallment, setDetailInstallment] = useState<Installment | null>(null);
   const [detailPopoverId, setDetailPopoverId] = useState<number | null>(null);
+  const [existingInvoice, setExistingInvoice] = useState<Invoice | null>(null);
+  const [isGeneratingInvoice, setIsGeneratingInvoice] = useState(false);
 
   const copyToClipboard = async (text: string, fieldName: string) => {
     try {
@@ -160,12 +179,15 @@ export function SaleDetailModal({ sale, open, onOpenChange, onEdit }: SaleDetail
         console.warn('Sale items API not available:', error);
         setSaleItems([]);
       }
-
-
-
       if (sale.payment_type === 'installments') {
         const installmentData = await window.electronAPI.database.installments.getBySale(sale.id!);
         setInstallments(installmentData);
+      }
+
+      // Load invoice if exists
+      if (window.electronAPI.database.invoices) {
+        const invoice = await window.electronAPI.database.invoices.getBySaleId(sale.id!);
+        setExistingInvoice(invoice);
       }
     } catch (error) {
       console.error('Error loading sale details:', error);
@@ -206,289 +228,169 @@ export function SaleDetailModal({ sale, open, onOpenChange, onEdit }: SaleDetail
     }
   };
 
+  const handleWhatsAppShare = () => {
+    if (!sale) return;
+    if (!sale) return;
+
+    // Check phone availability early
+    if (!customer?.phone) {
+      toast.error('El cliente no tiene un teléfono registrado para WhatsApp');
+      return;
+    }
+
+    const formatAmt = (n: number) => new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(n);
+    const dateStr = formatDate(sale.date);
+
+    const productName = saleItems.length > 0
+      ? (saleItems.length === 1 ? saleItems[0].product_name : `sus productos (${saleItems.length})`)
+      : 'sus productos';
+
+    const customerName = customer?.name || 'Cliente';
+
+    let body = '';
+    if (sale.payment_type === 'installments') {
+      body = `Hola ${customerName}, te adjunto la factura con las cuotas actualizadas. Muchas gracias!`;
+    } else {
+      body = `Hola ${customerName}, te adjunto la factura por tu compra de ${productName}. Muchas gracias!`;
+    }
+
+    const text = encodeURIComponent(body);
+    const digits = (customer?.phone || '').replace(/\D/g, '');
+    const nativeUrl = `whatsapp://send?phone=+54${digits}&text=${text}`;
+    const webUrl = `https://web.whatsapp.com/send?phone=+54${digits}&text=${text}`;
+
+    if (typeof window !== 'undefined' && (window as any).electronAPI?.openExternal) {
+      (window as any).electronAPI.openExternal(nativeUrl).catch(() => {
+        (window as any).electronAPI.openExternal(webUrl);
+      });
+    } else {
+      window.open(webUrl, '_blank');
+    }
+  };
+
   const handlePrint = () => {
     window.print();
   };
 
-  const handleExportToPDF = async () => {
+  const handleEmitInvoice = async (): Promise<Invoice | null> => {
+    if (!sale) return null;
+    setIsGeneratingInvoice(true);
     try {
-      const { default: jsPDF } = await import('jspdf');
-      const autoTable = (await import('jspdf-autotable')).default;
-      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-      let yPosition = 16;
-      const now = new Date();
+      const nextNumber = await window.electronAPI.database.invoices.getNextInvoiceNumber();
+      const invoiceData = {
+        sale_id: sale.id!,
+        customer_id: sale.customer_id,
+        invoice_number: nextNumber,
+        total_amount: sale.total_amount,
+        status: 'emitted' as const,
+      };
 
+      const newInvoice = await window.electronAPI.database.invoices.create(invoiceData);
+      toast.success(`Factura ${nextNumber} emitida correctamente`);
 
+      // Reload details to show the invoice
+      await loadSaleDetails();
 
-      autoTable(doc, {
-        body: [[
-          {
-            content: 'Factura',
-            styles: { halign: 'left', fontSize: 18, textColor: '#ffffff' }
-          },
-        ]],
-        theme: 'plain',
-        styles: { fillColor: '#1e1e1e' },
-        margin: { left: 14, right: 14 },
-        startY: yPosition
-      });
-      yPosition = (doc as any).lastAutoTable.finalY + 6;
-
-
-
-      const billedTo = (
-        'Facturado a:' +
-        `\n${customer?.name ?? 'N/A'}` +
-        (customer?.address ? `\n${customer.address}` : '') +
-        (customer?.phone ? `\nTel: ${customer.phone}` : '') +
-        (customer?.secondary_phone ? `\nTel 2: ${customer.secondary_phone}` : '')
-      );
-
-      const referenceBlock = (
-        `Referencia: #${sale?.reference_code ?? sale?.sale_number ?? 'N/A'}` +
-        `\nFecha: ${sale?.date ? formatDate(sale.date) : 'N/A'}` +
-        `\nNúmero de factura: ${sale?.sale_number ?? 'N/A'}`
-      );
-
-      autoTable(doc, {
-        body: [[
-          { content: billedTo, styles: { halign: 'left' } },
-          { content: referenceBlock, styles: { halign: 'right' } }
-        ]],
-        theme: 'plain',
-        startY: yPosition,
-        margin: { left: 14, right: 14 },
-        columnStyles: {
-          0: { cellWidth: 'auto' },
-          1: { cellWidth: 'auto' }
-        }
-      });
-      yPosition = (doc as any).lastAutoTable.finalY + 8;
-
-
-      const paymentInfo = [
-        ['Método de Pago', sale?.payment_type ? getPaymentTypeBadge(sale.payment_type).label : 'N/A'],
-        ['Método de cobro', sale?.payment_method ? getPaymentMethodLabel(sale.payment_method) : 'N/A'],
-        ['Estado de Pago', sale?.payment_status ? getPaymentStatusBadge(sale.payment_status).label : 'N/A']
-      ];
-
-      autoTable(doc, {
-        body: [
-          [
-            {
-              content: paymentInfo.map(row => `${row[0]}: ${row[1]}`).join('\n'),
-              styles: { halign: 'left', fontSize: 10 }
-            },
-          ]
-        ],
-        theme: 'plain',
-        startY: yPosition,
-        margin: { left: 14, right: 14 },
-        columnStyles: {
-          0: { cellWidth: 'auto' },
-          1: { cellWidth: 'auto' }
-        }
-      });
-
-      yPosition = (doc as any).lastAutoTable.finalY + 15;
-
-
-
-      if (saleItems.length > 0) {
-        autoTable(doc, {
-          body: [[{ content: 'Producto(s)', styles: { halign: 'left', fontSize: 12 } }]],
-          theme: 'plain',
-          startY: yPosition,
-          margin: { left: 14, right: 14 }
-        });
-        yPosition = (doc as any).lastAutoTable.finalY + 4;
-
-        const isInstallmentSale = sale?.payment_type === 'installments';
-        const productsData = saleItems.map(item => (
-          isInstallmentSale
-            ? [
-              item.product_name || 'Producto',
-              item.quantity.toString()
-            ]
-            : [
-              item.product_name || 'Producto',
-              item.quantity.toString(),
-              formatCurrency(item.unit_price),
-              formatCurrency(item.line_total)
-            ]
-        ));
-
-        autoTable(doc, {
-          head: isInstallmentSale
-            ? [['Descripción', 'Cantidad']]
-            : [['Descripción', 'Cantidad', 'Precio Unit.', 'Importe']],
-          body: productsData,
-          startY: yPosition,
-          styles: { fontSize: 9, lineColor: [220, 220, 220], lineWidth: 0.1 },
-          headStyles: { fillColor: [232, 232, 232], textColor: [20, 20, 20], fontStyle: 'bold' },
-          columnStyles: isInstallmentSale
-            ? {
-              0: { cellWidth: 160 },
-              1: { halign: 'center', cellWidth: 20 }
-            }
-            : {
-              0: { cellWidth: 90 },
-              1: { halign: 'center', cellWidth: 20 },
-              2: { halign: 'right', cellWidth: 35 },
-              3: { halign: 'right', cellWidth: 35 }
-            },
-          margin: { left: 14, right: 14 }
-        });
-
-        yPosition = (doc as any).lastAutoTable.finalY + 8;
-
-
-
-        const pageWidth = (doc as any).internal.pageSize.getWidth();
-        const left = pageWidth - 100; // ancho del bloque
-        const width = 84;
-        const height = 10;
-
-
-
-        doc.setFillColor(30, 30, 30);
-        doc.rect(left, yPosition, width, height, 'F');
-        doc.setTextColor(255, 255, 255);
-        doc.setFontSize(10);
-        doc.text(`TOTAL A PAGAR:`, left + 4, yPosition + 7);
-        const totalDisplay = isInstallmentSale
-          ? `${sale?.number_of_installments ?? 0} cuotas de ${formatCurrency(sale?.installment_amount ?? 0)}`
-          : `${formatCurrency(sale?.total_amount ?? 0)}`;
-        doc.text(totalDisplay, left + width - 4, yPosition + 7, { align: 'right' });
-        doc.setTextColor(0, 0, 0);
-        yPosition += height + 12;
-      }
-
-
-
-      // Always fetch latest installments to avoid stale export data
-      let latestInstallments: Installment[] = installments;
-      if (sale?.payment_type === 'installments' && typeof window !== 'undefined' && (window as any).electronAPI?.database?.installments && sale.id) {
-        try {
-          latestInstallments = await (window as any).electronAPI.database.installments.getBySale(sale.id);
-        } catch (e) {
-          console.warn('No se pudieron obtener cuotas actualizadas, usando estado actual.', e);
-        }
-      }
-
-      if (sale?.payment_type === 'installments' && latestInstallments.length > 0) {
-
-
-        if (yPosition > 250) {
-          doc.addPage();
-          yPosition = 20;
-        }
-
-        doc.setFont('helvetica', 'bold');
-        doc.text('Cuotas:', 14, yPosition);
-        yPosition += 5;
-
-        const installmentsData = latestInstallments.map(installment => {
-          const displayDate = (installment.status === 'paid' && installment.paid_date)
-            ? installment.paid_date
-            : installment.due_date;
-          return [
-            installment.installment_number.toString(),
-            formatDate(displayDate),
-            formatCurrency(installment.amount),
-            formatCurrency(installment.paid_amount),
-            formatCurrency(installment.balance),
-            getInstallmentStatusLabel(installment.status)
-          ];
-        });
-
-        autoTable(doc, {
-          head: [['#', 'Fecha', 'Monto', 'Pagado', 'Balance', 'Estado']],
-          body: installmentsData,
-          startY: yPosition,
-          styles: { fontSize: 8 },
-          headStyles: { fillColor: [30, 30, 30] },
-          columnStyles: {
-            0: { halign: 'left', cellWidth: 15 },
-            1: { halign: 'left', cellWidth: 40 },
-            2: { halign: 'left', cellWidth: 35 },
-            3: { halign: 'left', cellWidth: 35 },
-            4: { halign: 'left', cellWidth: 30 },
-            5: { cellWidth: 25 }
-          },
-          margin: { left: 14, right: 0 }
-        });
-
-        yPosition = (doc as any).lastAutoTable.finalY + 15;
-      }
-
-
-
-      doc.save(`${sale?.sale_number ?? 'unknown'}-${new Date().toISOString().split('T')[0]}.pdf`);
+      // Return the new invoice to be used immediately
+      return { ...invoiceData, id: newInvoice };
     } catch (error) {
-      console.error('Error al exportar:', error);
-      alert('Error al exportar los datos de la venta');
+      console.error('Error emitting invoice:', error);
+      toast.error('Error al emitir la factura');
+      return null;
+    } finally {
+      setIsGeneratingInvoice(false);
+    }
+  };
+
+  const handleInvoiceAction = async () => {
+    if (!sale) return;
+
+    if (existingInvoice) {
+      // Redirect to invoices page with highlight
+      router.push(`/invoices?highlight=${existingInvoice.id}`);
+      onOpenChange(false);
+      return;
+    }
+
+    // Auto-emit invoice
+    setIsGeneratingInvoice(true);
+    try {
+      await handleEmitInvoice();
+      toast.success('Factura generada correctamente');
+    } catch (error) {
+      console.error('Error auto-emitting invoice:', error);
+      toast.error('Error al generar la factura');
+    } finally {
+      setIsGeneratingInvoice(false);
     }
   };
 
   const handleExportToExcel = async () => {
     try {
-      const XLSX = await import('xlsx');
-
+      const ExcelJS = await import('exceljs');
+      const workbook = new ExcelJS.Workbook();
 
       const periodLabel = sale?.payment_type === 'installments' ? (sale?.period_type === 'weekly' ? 'Semanal (1 y 15)' : 'Mensual') : 'N/A';
 
-      const saleData = {
-        'Referencia': sale?.reference_code ?? sale?.sale_number ?? 'N/A',
-        'Número de Venta': sale?.sale_number ?? 'N/A',
-        'Fecha': sale?.date ? formatDate(sale.date) : 'N/A',
-        'Cliente': customer?.name || 'N/A',
-        'Teléfono': customer?.phone || 'N/A',
-        'Teléfono secundario': customer?.secondary_phone || 'N/A',
-        'Dirección': customer?.address || 'N/A',
-        'Subtotal': sale?.subtotal ?? 0,
-        'Total': sale?.total_amount ?? 0,
-        'Método de Pago': sale?.payment_type ? getPaymentTypeBadge(sale.payment_type).label : 'N/A',
-        'Método de cobro': sale?.payment_method ? getPaymentMethodLabel(sale.payment_method) : 'N/A',
-        'Periodo': periodLabel,
-        'Estado de Pago': sale?.payment_status ? getPaymentStatusBadge(sale.payment_status).label : 'N/A',
-        'Estado': sale?.status ? getStatusBadge(sale.status).label : 'N/A',
-        'Notas': sale?.notes || ''
-      };
-
-      const workbook = XLSX.utils.book_new();
-
-
-
-      const saleSheet = XLSX.utils.json_to_sheet([saleData]);
-
-
-      saleSheet['!cols'] = [
-        { wch: 16 }, { wch: 14 }, { wch: 22 }, { wch: 14 }, { wch: 18 }, { wch: 28 }, { wch: 12 }, { wch: 12 }, { wch: 18 }, { wch: 18 }, { wch: 14 }, { wch: 18 }, { wch: 18 }, { wch: 12 }
+      // Sale Details Sheet
+      const saleSheet = workbook.addWorksheet('Detalle de Venta');
+      saleSheet.columns = [
+        { header: 'Referencia', key: 'referencia', width: 16 },
+        { header: 'Número de Venta', key: 'numero', width: 14 },
+        { header: 'Fecha', key: 'fecha', width: 22 },
+        { header: 'Cliente', key: 'cliente', width: 14 },
+        { header: 'Teléfono', key: 'telefono', width: 18 },
+        { header: 'Teléfono secundario', key: 'telefono2', width: 28 },
+        { header: 'Dirección', key: 'direccion', width: 12 },
+        { header: 'Subtotal', key: 'subtotal', width: 12 },
+        { header: 'Total', key: 'total', width: 18 },
+        { header: 'Método de Pago', key: 'metodo_pago', width: 18 },
+        { header: 'Método de cobro', key: 'metodo_cobro', width: 14 },
+        { header: 'Periodo', key: 'periodo', width: 18 },
+        { header: 'Estado de Pago', key: 'estado_pago', width: 18 },
+        { header: 'Estado', key: 'estado', width: 12 },
+        { header: 'Notas', key: 'notas', width: 40 }
       ];
-      saleSheet['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: 0, c: 13 } }) };
-      XLSX.utils.book_append_sheet(workbook, saleSheet, 'Detalle de Venta');
 
+      saleSheet.addRow({
+        referencia: sale?.reference_code ?? sale?.sale_number ?? 'N/A',
+        numero: sale?.sale_number ?? 'N/A',
+        fecha: sale?.date ? formatDate(sale.date) : 'N/A',
+        cliente: customer?.name || 'N/A',
+        telefono: customer?.phone || 'N/A',
+        telefono2: customer?.secondary_phone || 'N/A',
+        direccion: customer?.address || 'N/A',
+        subtotal: sale?.subtotal ?? 0,
+        total: sale?.total_amount ?? 0,
+        metodo_pago: sale?.payment_type === 'cash' ? 'Al Contado' : 'Cuotas',
+        metodo_cobro: sale?.payment_method ? getPaymentMethodLabel(sale.payment_method) : 'N/A',
+        periodo: periodLabel,
+        estado_pago: sale?.payment_status === 'paid' ? 'Pagada' : sale?.payment_status === 'overdue' ? 'Vencida' : 'Pendiente',
+        estado: sale?.status === 'completed' ? 'Completada' : 'Pendiente',
+        notas: sale?.notes || ''
+      });
 
-
+      // Products Sheet
       if (saleItems.length > 0) {
-        const productsData = saleItems.map(item => ({
-          'Producto': item.product_name || 'Producto',
-          'Cantidad': item.quantity,
-          'Precio Unitario': item.unit_price,
-          'Total': item.line_total
-        }));
-        const productsSheet = XLSX.utils.json_to_sheet(productsData);
-        productsSheet['!cols'] = [
-          { wch: 28 }, { wch: 10 }, { wch: 14 }, { wch: 14 }
+        const productsSheet = workbook.addWorksheet('Productos');
+        productsSheet.columns = [
+          { header: 'Producto', key: 'producto', width: 28 },
+          { header: 'Cantidad', key: 'cantidad', width: 10 },
+          { header: 'Precio Unitario', key: 'precio', width: 14 },
+          { header: 'Total', key: 'total', width: 14 }
         ];
-        productsSheet['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: 0, c: 3 } }) };
-        XLSX.utils.book_append_sheet(workbook, productsSheet, 'Productos');
+
+        saleItems.forEach(item => {
+          productsSheet.addRow({
+            producto: item.product_name || 'Producto',
+            cantidad: item.quantity,
+            precio: item.unit_price,
+            total: item.line_total
+          });
+        });
       }
 
-
-
-      // Fetch latest installments to ensure up-to-date Excel export
+      // Installments Sheet
       let latestInstallments: Installment[] = installments;
       if (sale?.payment_type === 'installments' && typeof window !== 'undefined' && (window as any).electronAPI?.database?.installments && sale?.id) {
         try {
@@ -499,46 +401,58 @@ export function SaleDetailModal({ sale, open, onOpenChange, onEdit }: SaleDetail
       }
 
       if (latestInstallments.length > 0) {
-        const installmentsData = latestInstallments.map(installment => {
+        const installmentsSheet = workbook.addWorksheet('Cuotas');
+        installmentsSheet.columns = [
+          { header: 'Cuota', key: 'cuota', width: 8 },
+          { header: 'Fecha', key: 'fecha', width: 14 },
+          { header: 'Monto', key: 'monto', width: 12 },
+          { header: 'Pagado', key: 'pagado', width: 12 },
+          { header: 'Balance', key: 'balance', width: 12 },
+          { header: 'Estado', key: 'estado', width: 12 }
+        ];
+
+        latestInstallments.forEach(installment => {
           const displayDate = (installment.status === 'paid' && installment.paid_date)
             ? installment.paid_date
             : installment.due_date;
-          return ({
-            'Cuota': installment.installment_number,
-            'Fecha': formatDate(displayDate),
-            'Monto': installment.amount,
-            'Pagado': installment.paid_amount,
-            'Balance': installment.balance,
-            'Estado': installment.status
+
+          installmentsSheet.addRow({
+            cuota: installment.installment_number,
+            fecha: formatDate(displayDate),
+            monto: installment.amount,
+            pagado: installment.paid_amount,
+            balance: installment.balance,
+            estado: installment.status
           });
         });
-        const installmentsSheet = XLSX.utils.json_to_sheet(installmentsData);
-        installmentsSheet['!cols'] = [
-          { wch: 8 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 12 }
-        ];
-        installmentsSheet['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: 0, c: 5 } }) };
-        XLSX.utils.book_append_sheet(workbook, installmentsSheet, 'Cuotas');
       }
 
+      // Summary Sheet
+      const productsTotal = saleItems.reduce((sum: number, i: SaleItem) => sum + (i.line_total || 0), 0);
+      const installmentsTotal = installments.reduce((sum: number, i: Installment) => sum + (i.amount || 0), 0);
 
-
-      const productsTotal = saleItems.reduce((sum, i) => sum + (i.line_total || 0), 0);
-      const installmentsTotal = installments.reduce((sum, i) => sum + (i.amount || 0), 0);
-      const summaryRows = [
-        { Concepto: 'Subtotal', Valor: sale?.subtotal ?? 0 },
-        { Concepto: 'Total', Valor: sale?.total_amount ?? 0 },
-        { Concepto: 'Productos (total $)', Valor: productsTotal },
-        { Concepto: 'Cuotas (total $)', Valor: installmentsTotal },
-        { Concepto: 'Productos (cantidad)', Valor: saleItems.length },
-        { Concepto: 'Cuotas (cantidad)', Valor: installments.length }
+      const summarySheet = workbook.addWorksheet('Resumen');
+      summarySheet.columns = [
+        { header: 'Concepto', key: 'concepto', width: 24 },
+        { header: 'Valor', key: 'valor', width: 16 }
       ];
-      const summarySheet = XLSX.utils.json_to_sheet(summaryRows);
-      summarySheet['!cols'] = [{ wch: 24 }, { wch: 16 }];
-      XLSX.utils.book_append_sheet(workbook, summarySheet, 'Resumen');
 
+      summarySheet.addRow({ concepto: 'Subtotal', valor: sale?.subtotal ?? 0 });
+      summarySheet.addRow({ concepto: 'Total', valor: sale?.total_amount ?? 0 });
+      summarySheet.addRow({ concepto: 'Productos (total $)', valor: productsTotal });
+      summarySheet.addRow({ concepto: 'Cuotas (total $)', valor: installmentsTotal });
+      summarySheet.addRow({ concepto: 'Productos (cantidad)', valor: saleItems.length });
+      summarySheet.addRow({ concepto: 'Cuotas (cantidad)', valor: installments.length });
 
-
-      XLSX.writeFile(workbook, `${sale?.sale_number ?? 'unknown'}-${new Date().toISOString().split('T')[0]}.xlsx`);
+      // Save file
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${sale?.sale_number ?? 'unknown'}-${new Date().toISOString().split('T')[0]}.xlsx`;
+      link.click();
+      URL.revokeObjectURL(url);
     } catch (error) {
       console.error('Error al exportar a Excel:', error);
       alert('Error al exportar los datos de la venta a Excel');
@@ -547,384 +461,437 @@ export function SaleDetailModal({ sale, open, onOpenChange, onEdit }: SaleDetail
 
   if (!sale) return null;
 
-  const paymentStatusBadge = getPaymentStatusBadge(sale.payment_status);
-  const paymentTypeBadge = getPaymentTypeBadge(sale.payment_type);
-  const statusBadge = getStatusBadge(sale.status);
-  const StatusIcon = paymentStatusBadge.icon;
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl overflow-hidden p-0 pt-4 sm:max-w-[98vw] lg:max-w-[75vw] xl:max-w-[70vw]">
-        <DialogHeader className="px-6 pt-6 pb-2">
+      <DialogContent className="max-w-4xl antialiased w-[95vw] lg:w-full max-h-[90vh] lg:h-auto overflow-hidden p-0 rounded-xl border-none shadow-2xl bg-background/90 backdrop-blur-xl">
+        <DialogHeader className="p-6 pb-2">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-primary/10 rounded-full flex items-center justify-center">
-                <CreditCard className="w-5 h-5 text-primary" />
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center">
+                <FileText className="w-6 h-6 text-primary" />
               </div>
               <div>
-                <DialogTitle className="text-xl font-bold">
-                  {saleItems[0]?.product_name || `Venta #${sale.sale_number}`}
+                <DialogTitle className="text-xl font-bold tracking-tight">
+                  {sale.items && sale.items.length > 0 ? sale.items[0].product_name : 'Venta'}
                 </DialogTitle>
-                <DialogDescription className="flex items-center gap-2 mt-1">
-                  <Calendar className="w-4 h-4" />
+                <DialogDescription className="flex items-center gap-2 mt-0.5 text-xs font-medium uppercase tracking-widest opacity-60">
+                  <Calendar className="w-3.5 h-3.5" />
                   {formatDate(sale.date)}
-                  {sale.due_date && (
+                  {sale.reference_code && (
                     <>
                       <span>•</span>
-                      <span>Vence: {formatDate(sale.due_date)}</span>
+                      <span>Ref: {sale.reference_code}</span>
                     </>
                   )}
                 </DialogDescription>
               </div>
             </div>
             <div className="flex items-center gap-2">
-
               <div className="flex gap-2">
-                <Button variant="outline" size="sm" onClick={handleExportToPDF}>
-                  <Download className="w-4 h-4 mr-2" />
-                  PDF
+                <Button variant="ghost" size="icon" onClick={handleWhatsAppShare} className="h-9 w-9 text-green-600 hover:bg-green-500/10 hover:text-green-700">
+                  <MessageCircle className="w-5 h-5" />
                 </Button>
-                <Button variant="outline" size="sm" onClick={handleExportToExcel}>
-                  <Download className="w-4 h-4 mr-2" />
-                  Excel
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={handleInvoiceAction}
+                        className={cn(
+                          "h-9 w-9 transition-all",
+                          existingInvoice ? "text-emerald-600 hover:bg-emerald-500/10" : "text-muted-foreground hover:text-primary"
+                        )}
+                      >
+                        {existingInvoice ? <FileCheck className="w-5 h-5" /> : <FileText className="w-4 h-4" />}
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>{existingInvoice ? 'Ver Factura' : 'Emitir Factura'}</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+                <Button variant="ghost" size="icon" onClick={handleExportToExcel} className="h-9 w-9 text-muted-foreground hover:text-primary">
+                  <FileText className="w-4 h-4" />
                 </Button>
               </div>
             </div>
           </div>
         </DialogHeader>
 
-        <ScrollArea className="max-h-[calc(90vh-120px)] px-6 pb-6">
+        <ScrollArea className="max-h-[calc(90vh-100px)] px-6 pb-6 custom-scrollbar">
           <div className="space-y-6">
             {/* Status and Summary Cards */}
             <div className="grid gap-4 md:grid-cols-3">
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-medium flex items-center gap-2">
-                    <StatusIcon className={cn("w-4 h-4", paymentStatusBadge.color)} />
-                    Estado de Pago
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <Badge variant={paymentStatusBadge.variant}>
-                    {paymentStatusBadge.label}
-                  </Badge>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-medium flex items-center gap-2">
-                    <DollarSign className="w-4 h-4 text-green-600" />
-                    Total
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">{formatCurrency(sale.total_amount)}</div>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm font-medium flex items-center gap-2">
-                    <CreditCard className="w-4 h-4" />
-                    Método de Pago
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="flex gap-2">
-                  <Badge variant={paymentTypeBadge.variant}>
-                    {paymentTypeBadge.label}
-                  </Badge>
-                  {sale.payment_method && (
-                    <Badge variant={paymentTypeBadge.variant}>{getPaymentMethodLabel(sale.payment_method)}</Badge>
+              <div className="bg-card/40 backdrop-blur-md p-4 rounded-xl border border-border/40 shadow-sm space-y-3">
+                <div className="flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-primary" />
+                  <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Estado de Pago</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  {getPaymentStatusBadge(sale.payment_status)}
+                  {sale.due_date && sale.payment_status !== 'paid' && (
+                    <span className="text-[10px] font-bold text-red-500/80">Vence: {formatDate(sale.due_date)}</span>
                   )}
-                </CardContent>
-              </Card>
+                </div>
+              </div>
+
+              <div className="bg-primary/5 backdrop-blur-md p-4 rounded-xl border border-primary/10 shadow-sm space-y-1">
+                <div className="flex items-center gap-2">
+                  <DollarSign className="w-4 h-4 text-primary" />
+                  <span className="text-xs font-bold uppercase tracking-widest text-primary/80">Total Venta</span>
+                </div>
+                <div className="text-2xl font-black tracking-tight tabular-nums text-primary">{formatCurrency(sale.total_amount)}</div>
+
+                {existingInvoice && (
+                  <div className="flex items-center gap-1.5 pt-1">
+                    <Receipt className="w-3.5 h-3.5 text-emerald-500" />
+                    <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider">Factura: {existingInvoice.invoice_number}</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-card/40 backdrop-blur-md p-4 rounded-xl border border-border/40 shadow-sm space-y-3">
+                <div className="flex items-center gap-2">
+                  <CreditCard className="w-4 h-4 text-primary" />
+                  <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Método</span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {getPaymentTypeBadge(sale.payment_type)}
+                  {sale.payment_method && (
+                    <Badge variant="outline" className="bg-background/50 border-border/40 text-xs">{getPaymentMethodLabel(sale.payment_method)}</Badge>
+                  )}
+                </div>
+              </div>
             </div>
 
             <Tabs defaultValue="details" className="w-full">
-              <TabsList className="grid w-full grid-cols-4 pb-10">
-                <TabsTrigger value="details">Detalles</TabsTrigger>
-                <TabsTrigger value="customer">Cliente</TabsTrigger>
-                <TabsTrigger value="items">Productos</TabsTrigger>
+              <TabsList className="flex w-full overflow-x-auto bg-muted/20 p-1 rounded-xl border border-border/40 gap-1 h-auto mb-6">
+                <TabsTrigger value="details" className="flex-1 rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm py-2 text-xs font-bold uppercase tracking-widest">Detalles</TabsTrigger>
+                <TabsTrigger value="customer" className="flex-1 rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm py-2 text-xs font-bold uppercase tracking-widest">Cliente</TabsTrigger>
+                <TabsTrigger value="items" className="flex-1 rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm py-2 text-xs font-bold uppercase tracking-widest">Productos</TabsTrigger>
                 {sale.payment_type === 'installments' && (
-                  <TabsTrigger value="installments">Cuotas</TabsTrigger>
+                  <TabsTrigger value="installments" className="flex-1 rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm py-2 text-xs font-bold uppercase tracking-widest">Cuotas</TabsTrigger>
                 )}
               </TabsList>
 
               {/* Sale Details Tab */}
-              <TabsContent value="details" className="space-y-4">
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <FileText className="w-5 h-5" />
-                      Información de la Venta
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div className="grid gap-4 md:grid-cols-2">
-                      <div className="space-y-3">
-                        <div className="flex justify-between">
-                          <span className="text-sm font-medium">Número de Venta:</span>
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm">{sale.sale_number}</span>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-6 w-6 p-0"
-                              onClick={() => copyToClipboard(sale.sale_number, 'sale_number')}
-                            >
-                              <Copy className="w-3 h-3" />
-                            </Button>
-                          </div>
+              <TabsContent value="details" className="space-y-4 outline-none">
+                <div className="bg-card/40 backdrop-blur-md p-6 rounded-xl border border-border/40 shadow-sm space-y-6">
+                  <div className="flex items-center gap-2">
+                    <FileText className="w-4 h-4 text-primary" />
+                    <h3 className="text-xs font-bold uppercase tracking-widest text-foreground/80">Información de la Venta</h3>
+                  </div>
+
+                  <div className="grid gap-8 md:grid-cols-2">
+                    <div className="space-y-4">
+                      <div className="flex justify-between items-center group">
+                        <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Número de Venta</span>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-sm font-bold bg-primary/5 px-2 py-1 rounded-lg border border-primary/10">{sale.sale_number}</span>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-muted-foreground hover:text-primary transition-colors"
+                            onClick={() => copyToClipboard(sale.sale_number, 'sale_number')}
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                          </Button>
                         </div>
-                        <div className="flex justify-between">
-                          <span className="text-sm font-medium">Fecha de Venta:</span>
-                          <span className="text-sm">{formatDate(sale.date)}</span>
-                        </div>
-                        {sale.due_date && (
-                          <div className="flex justify-between">
-                            <span className="text-sm font-medium">Fecha de Vencimiento:</span>
-                            <span className="text-sm">{formatDate(sale.due_date)}</span>
-                          </div>
-                        )}
-                        <div className="flex justify-between">
-                          <span className="text-sm font-medium">Estado:</span>
-                          <Badge variant={statusBadge.variant}>
-                            {statusBadge.label}
-                          </Badge>
-                        </div>
-                        {sale.payment_type === 'installments' && (
-                          <div className="space-y-1">
-                            <div className="flex justify-between">
-                              <span className="text-sm font-medium">Periodo:</span>
-                              <span className="text-sm">{sale.period_type === 'weekly' ? 'Semanal' : sale.period_type === 'biweekly' ? 'Quincenal' : 'Mensual'}</span>
-                            </div>
-                          </div>
-                        )}
                       </div>
-                      <div className="space-y-3">
-                        <div className="flex justify-between">
-                          <span className="text-sm font-medium">Subtotal:</span>
-                          <span className="text-sm">{formatCurrency(sale.subtotal)}</span>
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Fecha de Venta</span>
+                        <span className="text-sm font-semibold">{formatDate(sale.date)}</span>
+                      </div>
+                      {sale.due_date && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Vencimiento</span>
+                          <span className="text-sm font-semibold text-red-500">{formatDate(sale.due_date)}</span>
                         </div>
-                        <Separator />
-                        <div className="flex justify-between font-medium">
-                          <span>Total:</span>
-                          <span>{formatCurrency(sale.total_amount)}</span>
+                      )}
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Estado</span>
+                        {getStatusBadge(sale.status)}
+                      </div>
+                      {sale.payment_type === 'installments' && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Periodicidad</span>
+                          <span className="text-sm font-semibold italic text-primary">
+                            {sale.period_type === 'weekly' ? 'Semanal' : sale.period_type === 'biweekly' ? 'Quincenal' : 'Mensual'}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-4">
+                      <div className="p-4 bg-muted/20 rounded-xl border border-border/20 space-y-3">
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="font-bold uppercase tracking-widest text-muted-foreground">Subtotal de Ítems</span>
+                          <span className="font-bold">{formatCurrency(sale.subtotal)}</span>
+                        </div>
+                        {sale.discount_amount ? (
+                          <div className="flex justify-between items-center text-xs">
+                            <span className="font-bold uppercase tracking-widest text-red-500/70">Descuento Aplicado</span>
+                            <span className="font-bold text-red-500">-{formatCurrency(sale.discount_amount)}</span>
+                          </div>
+                        ) : null}
+                        <div className="h-px bg-border/40" />
+                        <div className="flex justify-between items-center">
+                          <span className="text-xs font-black uppercase tracking-widest text-primary">Total Final</span>
+                          <span className="text-lg font-black text-primary tabular-nums">{formatCurrency(sale.total_amount)}</span>
                         </div>
                       </div>
                     </div>
-                    {sale.notes && (
-                      <div className="mt-4">
-                        <span className="text-sm font-medium">Notas:</span>
-                        <p className="text-sm text-muted-foreground mt-1 p-3 bg-muted rounded-md">
-                          {sale.notes}
-                        </p>
-                      </div>
-                    )}
-                    {(sale.created_at || sale.updated_at) && (
-                      <div className="mt-4 pt-4 border-t">
-                        <div className="grid gap-2 text-xs text-muted-foreground">
-                          {sale.created_at && (
-                            <div>Creado: {formatDateTime(sale.created_at)}</div>
-                          )}
-                          {sale.updated_at && (
-                            <div>Actualizado: {formatDateTime(sale.updated_at)}</div>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-              </TabsContent>
+                  </div>
 
-              {/* Customer Tab */}
-              <TabsContent value="customer" className="space-y-4">
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <User className="w-5 h-5" />
-                      Información del Cliente
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    {isLoading ? (
-                      <div className="space-y-3">
-                        <Skeleton className="h-4 w-48" />
-                        <Skeleton className="h-4 w-36" />
-                        <Skeleton className="h-4 w-52" />
+                  {sale.notes && (
+                    <div className="space-y-2 pt-4 mt-4 border-t border-border/40">
+                      <div className="flex items-center gap-2">
+                        <AlertTriangle className="w-3.5 h-3.5 text-muted-foreground/60" />
+                        <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground/60">Notas Internas</span>
                       </div>
-                    ) : customer ? (
-                      <div className="space-y-4">
-                        <div className="flex items-center gap-3">
-                          <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center">
-                            <User className="w-6 h-6 text-primary" />
+                      <p className="text-xs font-medium leading-relaxed text-muted-foreground p-4 bg-muted/10 rounded-xl border border-border/20 italic">
+                        &quot;{sale.notes}&quot;
+                      </p>
+                    </div>
+                  )}
+
+                  {(sale.created_at || sale.updated_at) && (
+                    <div className="pt-4 border-t border-border/40">
+                      <div className="grid grid-cols-2 gap-4">
+                        {sale.created_at && (
+                          <div className="flex flex-col gap-1">
+                            <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/40">Registro</span>
+                            <span className="text-[10px] font-medium opacity-60">{formatDateTime(sale.created_at)}</span>
                           </div>
-                          <div>
-                            <h3 className="font-semibold">{customer.name}</h3>
-                          </div>
-                        </div>
-                        <div className="grid gap-3">
-                          {customer.secondary_phone && (
-                            <div className="flex items-center gap-3">
-                              <Phone className="w-4 h-4 text-muted-foreground" />
-                              <span
-                                className="text-sm cursor-pointer hover:bg-muted px-2 py-1 rounded transition-colors"
-                                onClick={() => copyToClipboard(customer.secondary_phone!, 'secondary_phone')}
-                                title="Clic para copiar"
-                              >
-                                {customer.secondary_phone}
-                              </span>
-                            </div>
-                          )}
-                          {customer.phone && (
-                            <div className="flex items-center gap-3">
-                              <Phone className="w-4 h-4 text-muted-foreground" />
-                              <span
-                                className="text-sm cursor-pointer hover:bg-muted px-2 py-1 rounded transition-colors"
-                                onClick={() => copyToClipboard(customer.phone!, 'phone')}
-                                title="Clic para copiar"
-                              >
-                                {customer.phone}
-                              </span>
-                            </div>
-                          )}
-                          {customer.address && (
-                            <div className="flex items-center gap-3">
-                              <MapPin className="w-4 h-4 text-muted-foreground" />
-                              <span
-                                className="text-sm cursor-pointer hover:bg-muted px-2 py-1 rounded transition-colors"
-                                onClick={() => copyToClipboard(customer.address!, 'address')}
-                                title="Clic para copiar"
-                              >
-                                {customer.address}
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                        {customer.notes && (
-                          <div className="mt-4">
-                            <span className="text-sm font-medium">Notas del Cliente:</span>
-                            <p className="text-sm text-muted-foreground mt-1 p-3 bg-muted rounded-md">
-                              {customer.notes}
-                            </p>
+                        )}
+                        {sale.updated_at && (
+                          <div className="flex flex-col gap-1 text-right">
+                            <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/40">Última Modif.</span>
+                            <span className="text-[10px] font-medium opacity-60">{formatDateTime(sale.updated_at)}</span>
                           </div>
                         )}
                       </div>
-                    ) : (
-                      <div className="text-center py-8">
-                        <User className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
-                        <p className="text-muted-foreground">No se encontró información del cliente</p>
+                    </div>
+                  )}
+                </div>
+              </TabsContent>
+
+              {/* Customer Tab */}
+              <TabsContent value="customer" className="space-y-4 outline-none">
+                <div className="bg-card/40 backdrop-blur-md p-6 rounded-xl border border-border/40 shadow-sm space-y-6">
+                  <div className="flex items-center gap-2">
+                    <User className="w-4 h-4 text-primary" />
+                    <h3 className="text-xs font-bold uppercase tracking-widest text-foreground/80">Información del Cliente</h3>
+                  </div>
+
+                  {isLoading ? (
+                    <div className="space-y-4">
+                      <Skeleton className="h-12 w-full rounded-xl" />
+                      <Skeleton className="h-24 w-full rounded-xl" />
+                    </div>
+                  ) : customer ? (
+                    <div className="space-y-6">
+                      <div className="flex items-center gap-4 bg-primary/5 p-4 rounded-xl border border-primary/10 transition-all hover:bg-primary/10">
+                        <div className="w-14 h-14 bg-primary/10 rounded-full flex items-center justify-center shrink-0">
+                          <User className="w-7 h-7 text-primary" />
+                        </div>
+                        <div>
+                          <h3 className="text-lg font-bold tracking-tight">{customer.name}</h3>
+                          {customer.dni && (
+                            <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground/60">DNI: {customer.dni}</span>
+                          )}
+                        </div>
                       </div>
-                    )}
-                  </CardContent>
-                </Card>
+
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div className="space-y-4">
+                          {customer.phone && (
+                            <div className="flex items-center gap-3 p-3 bg-muted/20 rounded-xl border border-border/40 group hover:bg-muted/40 transition-colors">
+                              <Phone className="w-4 h-4 text-primary" />
+                              <div className="flex-1">
+                                <span className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Teléfono Principal</span>
+                                <span className="text-sm font-semibold">{customer.phone}</span>
+                              </div>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground opacity-0 group-hover:opacity-100 transition-all"
+                                onClick={() => copyToClipboard(customer.phone!, 'phone')}
+                              >
+                                <Copy className="w-3.5 h-3.5" />
+                              </Button>
+                            </div>
+                          )}
+                          {customer.secondary_phone && (
+                            <div className="flex items-center gap-3 p-3 bg-muted/20 rounded-xl border border-border/40 group hover:bg-muted/40 transition-colors">
+                              <Phone className="w-4 h-4 text-primary" />
+                              <div className="flex-1">
+                                <span className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Teléfono Alternativo</span>
+                                <span className="text-sm font-semibold">{customer.secondary_phone}</span>
+                              </div>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground opacity-0 group-hover:opacity-100 transition-all"
+                                onClick={() => copyToClipboard(customer.secondary_phone!, 'secondary_phone')}
+                              >
+                                <Copy className="w-3.5 h-3.5" />
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="space-y-4">
+                          {customer.address && (
+                            <div className="flex items-center gap-3 p-3 bg-muted/20 rounded-xl border border-border/40 group hover:bg-muted/40 transition-colors">
+                              <MapPin className="w-4 h-4 text-primary" />
+                              <div className="flex-1">
+                                <span className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Dirección</span>
+                                <span className="text-sm font-semibold">{customer.address}</span>
+                              </div>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground opacity-0 group-hover:opacity-100 transition-all"
+                                onClick={() => copyToClipboard(customer.address!, 'address')}
+                              >
+                                <Copy className="w-3.5 h-3.5" />
+                              </Button>
+                            </div>
+                          )}
+                          {customer.email && (
+                            <div className="flex items-center gap-3 p-3 bg-muted/20 rounded-xl border border-border/40 group hover:bg-muted/40 transition-colors">
+                              <Mail className="w-4 h-4 text-primary" />
+                              <div className="flex-1">
+                                <span className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground">E-mail</span>
+                                <span className="text-sm font-semibold lowercase">{customer.email}</span>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {customer.notes && (
+                        <div className="space-y-2 pt-4 border-t border-border/40">
+                          <div className="flex items-center gap-2">
+                            <AlertCircle className="w-3.5 h-3.5 text-muted-foreground/60" />
+                            <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground/60">Notas del Cliente</span>
+                          </div>
+                          <p className="text-xs font-medium leading-relaxed text-muted-foreground p-4 bg-muted/10 rounded-xl border border-border/20 italic">
+                            &quot;{customer.notes}&quot;
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-center py-12 bg-muted/10 rounded-xl border border-border/20 border-dashed">
+                      <User className="w-10 h-10 text-muted-foreground/20 mx-auto mb-4" />
+                      <p className="text-sm font-bold uppercase tracking-widest text-muted-foreground/40">No se encontró información del cliente</p>
+                    </div>
+                  )}
+                </div>
               </TabsContent>
 
               {/* Items Tab */}
-              <TabsContent value="items" className="space-y-4">
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <Package className="w-5 h-5" />
-                      Productos Vendidos
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    {isLoading ? (
-                      <div className="space-y-3">
-                        {[...Array(3)].map((_, i) => (
-                          <div key={i} className="flex justify-between items-center">
-                            <Skeleton className="h-4 w-48" />
-                            <Skeleton className="h-4 w-24" />
-                          </div>
-                        ))}
-                      </div>
-                    ) : saleItems.length > 0 ? (
-                      <div className="space-y-4">
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead>Producto</TableHead>
-                              <TableHead className="text-center">Cantidad</TableHead>
-                              <TableHead className="text-right">Precio Unit.</TableHead>
+              <TabsContent value="items" className="space-y-4 outline-none">
+                <div className="bg-card/40 backdrop-blur-md p-6 rounded-xl border border-border/40 shadow-sm space-y-6">
+                  <div className="flex items-center gap-2">
+                    <Package className="w-4 h-4 text-primary" />
+                    <h3 className="text-xs font-bold uppercase tracking-widest text-foreground/80">Productos en esta Venta</h3>
+                  </div>
 
-                              <TableHead className="text-right">Total</TableHead>
+                  {isLoading ? (
+                    <div className="space-y-3">
+                      {[...Array(3)].map((_, i) => (
+                        <Skeleton key={i} className="h-12 w-full rounded-xl" />
+                      ))}
+                    </div>
+                  ) : saleItems.length > 0 ? (
+                    <div className="space-y-4">
+                      <div className="rounded-xl border border-border/40 overflow-hidden">
+                        <Table>
+                          <TableHeader className="bg-muted/30">
+                            <TableRow className="hover:bg-transparent border-border/40">
+                              <TableHead className="text-xs font-bold uppercase tracking-widest h-10">Producto</TableHead>
+                              <TableHead className="text-center text-xs font-bold uppercase tracking-widest h-10">Cant.</TableHead>
+                              <TableHead className="text-right text-xs font-bold uppercase tracking-widest h-10">Precio Unit.</TableHead>
+                              <TableHead className="text-right text-xs font-bold uppercase tracking-widest h-10">Subtotal</TableHead>
                             </TableRow>
                           </TableHeader>
                           <TableBody>
                             {saleItems.map((item, index) => (
-                              <TableRow key={item.id || index}>
-                                <TableCell className="font-medium">
+                              <TableRow key={item.id || index} className="hover:bg-primary/5 transition-colors border-border/20">
+                                <TableCell className="font-bold text-sm tracking-tight py-4">
                                   {item.product_name || `Producto ID: ${item.product_id}`}
                                 </TableCell>
-                                <TableCell className="text-center">{item.quantity}</TableCell>
-                                <TableCell className="text-right">
+                                <TableCell className="text-center font-bold tabular-nums">
+                                  {item.quantity}
+                                </TableCell>
+                                <TableCell className="text-right font-medium tabular-nums text-muted-foreground">
                                   {formatCurrency(item.unit_price)}
                                 </TableCell>
-
-                                <TableCell className="text-right font-medium">
+                                <TableCell className="text-right font-black tabular-nums text-primary">
                                   {formatCurrency(item.line_total)}
                                 </TableCell>
                               </TableRow>
                             ))}
                           </TableBody>
                         </Table>
-                        <div className="flex justify-end pt-4 border-t">
-                          <div className="text-right">
-                            <div className="text-sm text-muted-foreground">
-                              Total de productos: {saleItems.reduce((sum, item) => sum + item.quantity, 0)}
-                            </div>
-                            <div className="text-lg font-semibold">
-                              Subtotal: {formatCurrency(sale.subtotal)}
-                            </div>
+                      </div>
+
+                      <div className="flex justify-end pt-4">
+                        <div className="p-4 bg-primary/5 rounded-xl border border-primary/10 text-right min-w-[200px] space-y-1">
+                          <span className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Subtotal Productos</span>
+                          <div className="text-xl font-black text-primary tabular-nums">
+                            {formatCurrency(sale.subtotal)}
                           </div>
+                          <span className="block text-[10px] font-medium opacity-40 italic">
+                            {saleItems.reduce((sum, item) => sum + item.quantity, 0)} items en total
+                          </span>
                         </div>
                       </div>
-                    ) : (
-                      <div className="text-center py-8">
-                        <Package className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
-                        <p className="text-muted-foreground">No se encontraron productos en esta venta</p>
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
+                    </div>
+                  ) : (
+                    <div className="text-center py-12 bg-muted/10 rounded-xl border border-border/20 border-dashed">
+                      <Package className="w-10 h-10 text-muted-foreground/20 mx-auto mb-4" />
+                      <p className="text-sm font-bold uppercase tracking-widest text-muted-foreground/40">No hay productos registrados</p>
+                    </div>
+                  )}
+                </div>
               </TabsContent>
 
               {/* Installments Tab */}
               {sale.payment_type === 'installments' && (
-                <TabsContent value="installments" className="space-y-4">
-                  <Card>
-                    <CardHeader>
-                      <CardTitle className="flex items-center gap-2">
-                        <Clock className="w-5 h-5" />
-                        Plan de Cuotas
-                      </CardTitle>
-                      <CardDescription>
-                        {sale.number_of_installments} cuotas de {formatCurrency(Math.round(sale.installment_amount || 0))}
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent>
-                      {isLoading ? (
-                        <div className="space-y-3">
-                          {[...Array(3)].map((_, i) => (
-                            <div key={i} className="flex justify-between items-center">
-                              <Skeleton className="h-4 w-32" />
-                              <Skeleton className="h-4 w-24" />
-                              <Skeleton className="h-6 w-16" />
-                            </div>
-                          ))}
-                        </div>
-                      ) : installments.length > 0 ? (
+                <TabsContent value="installments" className="space-y-4 outline-none">
+                  <div className="bg-card/40 backdrop-blur-md p-6 rounded-xl border border-border/40 shadow-sm space-y-6">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Clock className="w-4 h-4 text-primary" />
+                        <h3 className="text-xs font-bold uppercase tracking-widest text-foreground/80">Cronograma de Pagos</h3>
+                      </div>
+                      <div className="text-[10px] font-bold uppercase tracking-widest text-primary/60 bg-primary/5 px-3 py-1 rounded-full border border-primary/10">
+                        {sale.number_of_installments} Pagos de {formatCurrency(Math.round(sale.installment_amount || 0))}
+                      </div>
+                    </div>
+
+                    {isLoading ? (
+                      <div className="space-y-3">
+                        {[...Array(3)].map((_, i) => (
+                          <Skeleton key={i} className="h-12 w-full rounded-xl" />
+                        ))}
+                      </div>
+                    ) : installments.length > 0 ? (
+                      <div className="rounded-xl border border-border/40 overflow-hidden">
                         <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead>Cuota</TableHead>
-                              <TableHead>Fecha de Vencimiento</TableHead>
-                              <TableHead className="text-right">Monto</TableHead>
-                              <TableHead className="text-center">Estado</TableHead>
-                              <TableHead>Fecha de Pago</TableHead>
-                              <TableHead className="text-right">Acciones</TableHead>
+                          <TableHeader className="bg-muted/30">
+                            <TableRow className="hover:bg-transparent border-border/40">
+                              <TableHead className="text-xs font-bold uppercase tracking-widest h-10">#</TableHead>
+                              <TableHead className="text-xs font-bold uppercase tracking-widest h-10">Vencimiento</TableHead>
+                              <TableHead className="text-right text-xs font-bold uppercase tracking-widest h-10">Monto</TableHead>
+                              <TableHead className="text-center text-xs font-bold uppercase tracking-widest h-10">Estado</TableHead>
+                              <TableHead className="text-center text-xs font-bold uppercase tracking-widest h-10">Pago</TableHead>
+                              <TableHead className="text-right text-xs font-bold uppercase tracking-widest h-10">Acción</TableHead>
                             </TableRow>
                           </TableHeader>
                           <TableBody>
@@ -933,42 +900,34 @@ export function SaleDetailModal({ sale, open, onOpenChange, onEdit }: SaleDetail
                                 new Date(installment.due_date) < new Date();
 
                               return (
-                                <TableRow key={installment.id || index}>
-                                  <TableCell className="font-medium">
-                                    Cuota {installment.installment_number}
+                                <TableRow key={installment.id || index} className="hover:bg-primary/5 transition-colors border-border/20">
+                                  <TableCell className="font-bold py-4">
+                                    {installment.installment_number}
                                   </TableCell>
                                   <TableCell>
                                     <div className={cn(
-                                      "text-sm",
-                                      isOverdue && "text-red-600 font-medium"
+                                      "text-sm font-semibold tracking-tight",
+                                      isOverdue ? "text-red-500" : "text-foreground"
                                     )}>
                                       {formatDate(installment.due_date)}
                                     </div>
                                   </TableCell>
-                                  <TableCell className="text-right">
+                                  <TableCell className="text-right font-black tabular-nums">
                                     {formatCurrency(installment.amount)}
                                   </TableCell>
                                   <TableCell className="text-center">
-                                    <Badge
-                                      variant={
-                                        installment.status === 'paid' ? 'default' :
-                                          isOverdue ? 'destructive' : 'secondary'
-                                      }
-                                    >
-                                      {installment.status === 'paid' ? 'Pagada' :
-                                        isOverdue ? 'Vencida' : 'Pendiente'}
-                                    </Badge>
+                                    {getInstallmentStatusBadge(installment.status, isOverdue)}
                                   </TableCell>
-                                  <TableCell>
+                                  <TableCell className="text-center">
                                     {installment.paid_date ? (
-                                      <span className="text-sm text-green-600">
+                                      <span className="text-xs font-bold text-green-600 bg-green-500/10 px-2 py-1 rounded-lg border border-green-500/20">
                                         {formatDate(installment.paid_date)}
                                       </span>
                                     ) : (
-                                      <span className="text-sm text-muted-foreground">-</span>
+                                      <span className="text-xs font-bold opacity-20 uppercase tracking-widest">Pendiente</span>
                                     )}
                                   </TableCell>
-                                  <TableCell className="text-right">
+                                  <TableCell className="text-right py-4">
                                     <Popover
                                       open={detailPopoverId === (installment.id || 0)}
                                       onOpenChange={(open) => {
@@ -980,25 +939,35 @@ export function SaleDetailModal({ sale, open, onOpenChange, onEdit }: SaleDetail
                                       }}
                                     >
                                       <PopoverTrigger asChild>
-                                        <Button size="sm" variant="outline">Ver detalles</Button>
+                                        <Button size="icon" variant="ghost" className="h-8 w-8 text-muted-foreground hover:text-primary">
+                                          <Search className="h-4 w-4" />
+                                        </Button>
                                       </PopoverTrigger>
-                                      <PopoverContent className="w-[260px] p-2" side="left" align="end">
-                                        <div className="space-y-2">
-                                          <div className="text-sm font-medium">Cuota #{detailInstallment?.installment_number}</div>
+                                      <PopoverContent className="w-[300px] p-0 overflow-hidden rounded-xl border-none shadow-2xl bg-background/95 backdrop-blur-md" side="left" align="end">
+                                        <div className="bg-primary/10 p-3 border-b border-primary/10">
+                                          <div className="text-xs font-black uppercase tracking-widest text-primary">Historial de Pagos</div>
+                                          <div className="text-[10px] font-bold opacity-60">Cuota #{detailInstallment?.installment_number} • {formatCurrency(detailInstallment?.amount || 0)}</div>
+                                        </div>
+                                        <div className="p-3">
                                           {detailTransactions.length === 0 ? (
-                                            <div className="text-xs text-muted-foreground">Sin transacciones</div>
+                                            <div className="flex flex-col items-center py-4 opacity-40">
+                                              <Clock className="w-8 h-8 mb-2" />
+                                              <span className="text-[10px] font-bold uppercase tracking-widest">Sin transacciones</span>
+                                            </div>
                                           ) : (
-                                            <div className="space-y-1">
+                                            <div className="space-y-3">
                                               {detailTransactions.map((t, i) => (
-                                                <div key={t.id || i} className="grid grid-cols-2 gap-1 text-xs">
-                                                  <div className="text-muted-foreground">Método</div>
-                                                  <div className="text-right">{getPaymentMethodLabel(t.payment_method)}</div>
-                                                  <div className="text-muted-foreground">Fecha</div>
-                                                  <div className="text-right">{formatDate(t.transaction_date)}</div>
-                                                  <div className="text-muted-foreground">Monto</div>
-                                                  <div className="text-right">{formatCurrency(t.amount)}</div>
-                                                  <div className="text-muted-foreground">Nota</div>
-                                                  <div className="text-right truncate" title={t.payment_reference || ''}>{t.payment_reference || '-'}</div>
+                                                <div key={t.id || i} className="p-2 bg-muted/20 rounded-lg border border-border/40 space-y-1 transition-colors hover:bg-muted/40">
+                                                  <div className="flex justify-between items-center">
+                                                    <span className="text-[10px] font-black italic text-primary">{getPaymentMethodLabel(t.payment_method)}</span>
+                                                    <span className="text-[10px] font-bold opacity-60 tabular-nums">{formatDate(t.transaction_date)}</span>
+                                                  </div>
+                                                  <div className="flex justify-between items-center">
+                                                    <span className="text-xs font-bold tabular-nums">{formatCurrency(t.amount)}</span>
+                                                    {t.payment_reference && (
+                                                      <span className="text-[9px] font-medium opacity-50 truncate max-w-[120px]" title={t.payment_reference}>{t.payment_reference}</span>
+                                                    )}
+                                                  </div>
                                                 </div>
                                               ))}
                                             </div>
@@ -1012,14 +981,14 @@ export function SaleDetailModal({ sale, open, onOpenChange, onEdit }: SaleDetail
                             })}
                           </TableBody>
                         </Table>
-                      ) : (
-                        <div className="text-center py-8">
-                          <Clock className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
-                          <p className="text-muted-foreground">No se encontraron cuotas para esta venta</p>
-                        </div>
-                      )}
-                    </CardContent>
-                  </Card>
+                      </div>
+                    ) : (
+                      <div className="text-center py-12 bg-muted/10 rounded-xl border border-border/20 border-dashed">
+                        <Clock className="w-10 h-10 text-muted-foreground/20 mx-auto mb-4" />
+                        <p className="text-sm font-bold uppercase tracking-widest text-muted-foreground/40">No se encontraron cuotas</p>
+                      </div>
+                    )}
+                  </div>
                 </TabsContent>
               )}
             </Tabs>

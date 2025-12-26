@@ -2,7 +2,7 @@
 
 import { getDatabase } from './database';
 import { SALE_NUMBER_PREFIX } from '../config/payments';
-import { scheduleAllPendingMonthly } from './installments-scheduler';
+import { scheduleAllPendingMonthly } from './installments/installments-scheduler';
 import type { CalendarEvent, EventType, EventStatus } from './calendar-types';
 
 function generateSaleNumberBase(): string {
@@ -195,6 +195,8 @@ export interface Sale {
   customer_name?: string;
   items?: SaleItem[];
   installments?: Installment[];
+  discount_amount?: number;
+  tax_amount?: number;
 }
 
 export interface PaymentTransaction {
@@ -224,7 +226,25 @@ export interface SaleFormData {
   period_type?: 'monthly' | 'weekly' | 'biweekly';
   number_of_installments?: number;
   notes?: string;
-  date?: string; // ISO-8601 opcional desde el formulario
+  date?: string;
+  discount_amount?: number;
+  tax_amount?: number;
+}
+
+export interface Invoice {
+  id?: number;
+  sale_id: number;
+  customer_id: number;
+  invoice_number: string;
+  status: 'emitted' | 'sent' | 'paid' | 'cancelled';
+  sent_at?: string;
+  created_at?: string;
+  updated_at?: string;
+  // Join fields for UI
+  customer_name?: string;
+  total_amount?: number;
+  customer_phone?: string;
+  sale_date?: string;
 }
 
 
@@ -908,6 +928,40 @@ export const saleOperations = {
     ) as Sale[];
   },
 
+  getSalePageNumber: (saleId: number, pageSize: number = 10, searchTerm: string = ''): number => {
+    const db = getDatabase();
+
+    // 1. Get the target sale to know its date
+    const targetSale = db.prepare('SELECT date, id FROM sales WHERE id = ?').get(saleId) as { date: string, id: number };
+    if (!targetSale) return 1;
+
+    let whereClause = '';
+    let params: any[] = [];
+
+    if (searchTerm.trim()) {
+      whereClause = 'AND (s.sale_number LIKE ? OR s.reference_code LIKE ? OR c.name LIKE ? OR s.notes LIKE ?)';
+      const searchPattern = `%${searchTerm.trim()}%`;
+      params = [searchPattern, searchPattern, searchPattern, searchPattern];
+    }
+
+    // 2. Count how many sales come before this one in the sort order (date DESC, then id DESC)
+    const rankStmt = db.prepare(`
+      SELECT COUNT(*) as rank
+      FROM sales s
+      LEFT JOIN customers c ON s.customer_id = c.id
+      WHERE (
+        s.date > ? OR 
+        (s.date = ? AND s.id > ?)
+      )
+      ${whereClause}
+    `);
+
+    const { rank } = rankStmt.get(targetSale.date, targetSale.date, targetSale.id, ...params) as { rank: number };
+
+    return Math.floor(rank / pageSize) + 1;
+  },
+
+
   getById: (id: number): Sale => {
     const db = getDatabase();
     const stmt = db.prepare(`
@@ -964,16 +1018,13 @@ export const saleOperations = {
     const subtotal = saleData.items.reduce((sum, item) =>
       sum + (item.quantity * item.unit_price), 0
     );
-    const totalAmount = subtotal;
+    const discountAmount = saleData.discount_amount || 0;
+    const taxAmount = saleData.tax_amount || 0;
+    const totalAmount = subtotal - discountAmount + taxAmount;
 
-
-
+    // ... (rest of logic) ...
     const saleNumber = generateUniqueSaleNumber();
-
-
     const referenceCode = generateUniqueReferenceCode();
-
-
 
     const saleStmt = db.prepare(`
       INSERT INTO sales (
@@ -995,8 +1046,8 @@ export const saleOperations = {
       (saleData.date && typeof saleData.date === 'string') ? saleData.date : new Date().toISOString(),
       null, // due_date
       subtotal,
-      0, // tax_amount
-      0, // discount_amount
+      taxAmount,
+      discountAmount,
       totalAmount,
       saleData.payment_type,
       saleData.payment_method || null,
@@ -1477,7 +1528,11 @@ export const installmentOperations = {
     const stmt = db.prepare('SELECT * FROM installments WHERE sale_id = ? ORDER BY COALESCE(original_installment_number, installment_number)');
     return stmt.all(saleId) as Installment[];
   },
-
+  getAll: (): Installment[] => {
+    const db = getDatabase();
+    const stmt = db.prepare('SELECT * FROM installments');
+    return stmt.all() as Installment[];
+  },
   getOverdue: (): Array<Installment & { customer_name: string; sale_number: string }> => {
     const db = getDatabase();
     const stmt = db.prepare(`
@@ -2060,5 +2115,76 @@ export const calendarOperations = {
     const db = getDatabase();
     const stmt = db.prepare('DELETE FROM calendar_events WHERE id = ?');
     stmt.run(id);
+  }
+};
+
+export const invoiceOperations = {
+  create: (invoice: Omit<Invoice, 'id' | 'created_at' | 'updated_at'>): number => {
+    const db = getDatabase();
+    const stmt = db.prepare(`
+      INSERT INTO invoices (sale_id, customer_id, invoice_number, status, total_amount, sent_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    const result = stmt.run(
+      invoice.sale_id,
+      invoice.customer_id,
+      invoice.invoice_number,
+      invoice.status || 'emitted',
+      invoice.total_amount,
+      invoice.sent_at || null
+    );
+    return result.lastInsertRowid as number;
+  },
+
+  update: (id: number, invoice: Partial<Invoice>): void => {
+    const db = getDatabase();
+    const fields = [];
+    const values = [];
+
+    if (invoice.status !== undefined) {
+      fields.push('status = ?');
+      values.push(invoice.status);
+    }
+    if (invoice.sent_at !== undefined) {
+      fields.push('sent_at = ?');
+      values.push(invoice.sent_at);
+    }
+
+    if (fields.length === 0) return;
+
+    fields.push("updated_at = datetime('now')");
+    values.push(id);
+    const stmt = db.prepare(`UPDATE invoices SET ${fields.join(', ')} WHERE id = ?`);
+    stmt.run(...values);
+  },
+
+  getBySaleId: (saleId: number): Invoice | null => {
+    const db = getDatabase();
+    const stmt = db.prepare('SELECT * FROM invoices WHERE sale_id = ?');
+    return (stmt.get(saleId) as Invoice) || null;
+  },
+
+  getAllWithDetails: (): Invoice[] => {
+    const db = getDatabase();
+    const stmt = db.prepare(`
+      SELECT i.*, c.name as customer_name, c.phone as customer_phone, s.total_amount, s.date as sale_date
+      FROM invoices i
+      JOIN sales s ON i.sale_id = s.id
+      JOIN customers c ON s.customer_id = c.id
+      ORDER BY i.created_at DESC
+    `);
+    return stmt.all() as Invoice[];
+  },
+
+  delete: (id: number): void => {
+    const db = getDatabase();
+    db.prepare('DELETE FROM invoices WHERE id = ?').run(id);
+  },
+
+  getNextInvoiceNumber: (): string => {
+    const db = getDatabase();
+    const row = db.prepare('SELECT COUNT(*) as count FROM invoices').get() as { count: number };
+    const nextNum = (row?.count || 0) + 1;
+    return `INV-${String(nextNum).padStart(6, '0')}`;
   }
 };

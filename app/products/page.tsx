@@ -13,6 +13,7 @@ import { Database } from 'lucide-react';
 import type { Product } from '@/lib/database-operations';
 import { useDataCache, usePrefetch } from '@/hooks/use-data-cache';
 import { SHOW_MOCK_BUTTONS } from '@/lib/feature-flags';
+import { toast } from 'sonner';
 
 export default function ProductsPage() {
   const searchParams = useSearchParams();
@@ -135,25 +136,7 @@ export default function ProductsPage() {
     }
   }, [searchTerm, currentPage, isElectron, loadProducts]);
 
-  const highlightedProduct = useMemo(() => {
-    if (!highlightId) return null;
-    return products.find(product => product.id?.toString() === highlightId);
-  }, [products, highlightId]);
-
-  useEffect(() => {
-    if (highlightedProduct) {
-      setTimeout(() => {
-        const element = document.getElementById(`producto-${highlightedProduct.id}`);
-        if (element) {
-          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          element.classList.add('ring-2', 'ring-primary', 'ring-offset-2');
-          setTimeout(() => {
-            element.classList.remove('ring-2', 'ring-primary', 'ring-offset-2');
-          }, 3000);
-        }
-      }, 100);
-    }
-  }, [highlightedProduct]);
+  // Highlighting logic moved to ProductsTable
 
 
 
@@ -171,8 +154,10 @@ export default function ProductsPage() {
 
       setEditingProduct(undefined);
       setIsFormOpen(false);
+      toast.success('Producto guardado correctamente');
     } catch (error) {
       console.error('Error añadiendo producto:', error);
+      toast.error('Error añadiendo producto');
       throw error;
     }
   };
@@ -303,6 +288,7 @@ export default function ProductsPage() {
   const handleEditProduct = (product: Product) => {
     setEditingProduct(product);
     setIsFormOpen(true);
+    toast.success('Producto editado correctamente');
   };
 
   const handleDeleteProduct = async (productId: number) => {
@@ -310,9 +296,10 @@ export default function ProductsPage() {
       await window.electronAPI.database.products.delete(productId);
       setProducts(prev => prev.filter(p => p.id !== productId));
       dataCache.invalidateCache('products');
+      toast.success('Producto eliminado correctamente');
     } catch (error: any) {
       console.error('Error eliminando product:', error);
-      alert(error.message || 'Error deleting product. Please try again.');
+      toast.error(error.message || 'Error deleting product. Please try again.');
     }
   };
 
@@ -331,7 +318,7 @@ export default function ProductsPage() {
       console.error('Error eliminando productos:', error);
 
 
-      alert(error.message || 'Error deleting products. Please try again.');
+      toast.error(error.message || 'Error deleting products. Please try again.');
     }
   };
 
@@ -351,7 +338,7 @@ export default function ProductsPage() {
     } catch (error) {
       console.error('Error actualizando producto:', error);
 
-
+      toast.error('Error updating product. Please try again.');
       setProducts(prev => prev.map(p => (
         p.id === productId ? { ...p, is_active: !isActive } : p
       )));

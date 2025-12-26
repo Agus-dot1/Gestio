@@ -4,10 +4,9 @@ import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { FileText, Download, Trash2, MoreHorizontal, CheckCircle, XCircle, Clock } from 'lucide-react';
 import type { Sale } from '@/lib/database-operations';
+import { formatCurrency } from '@/config/locale';
 
 interface SalesBulkOperationsProps {
   selectedSales: Set<number>;
@@ -16,15 +15,6 @@ interface SalesBulkOperationsProps {
   onBulkStatusUpdate: (saleIds: number[], status: Sale['payment_status']) => Promise<void>;
   onClearSelection: () => void;
   isLoading?: boolean;
-}
-
-function formatCurrency(amount: number): string {
-  return new Intl.NumberFormat('es-AR', {
-    style: 'currency',
-    currency: 'ARS',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  }).format(amount);
 }
 
 function formatDate(dateString: string): string {
@@ -75,7 +65,7 @@ export function SalesBulkOperations({
 
   const handleBulkStatusUpdate = async () => {
     if (!bulkStatus) return;
-    
+
     const selectedIds = Array.from(selectedSales);
     await onBulkStatusUpdate(selectedIds, bulkStatus);
     onClearSelection();
@@ -113,7 +103,7 @@ export function SalesBulkOperations({
 
 
     const tableData = selectedSalesData.map(sale => [
-      sale.sale_number,
+      sale.reference_code || sale.sale_number,
       formatDate(sale.date),
       sale.customer_name || 'N/A',
       getPaymentTypeLabel(sale.payment_type) ?? 'N/A',
@@ -122,19 +112,18 @@ export function SalesBulkOperations({
     ]);
 
     autoTable(doc, {
-      head: [['N° Venta', 'Fecha', 'Cliente', 'Método', 'Estado', 'Total']],
+      head: [['Referencia', 'Fecha', 'Cliente', 'Método', 'Estado', 'Total']],
       body: tableData,
       startY: 40,
       styles: { fontSize: 9, cellPadding: 2 },
       headStyles: { fillColor: [41, 128, 185], textColor: 255 },
       columnStyles: {
-        0: { cellWidth: 22 },
+        0: { cellWidth: 28 },
         1: { cellWidth: 24 },
         2: { cellWidth: 45 },
         3: { cellWidth: 22 },
         4: { cellWidth: 22 },
-        5: { cellWidth: 24, halign: 'right' },
-        6: { cellWidth: 28 }
+        5: { cellWidth: 24, halign: 'right' }
       },
       didDrawPage: (data: any) => {
         const str = `Página ${(doc as any).getNumberOfPages ? (doc as any).getNumberOfPages() : (doc as any).internal?.pages?.length || 1}`;
@@ -142,7 +131,7 @@ export function SalesBulkOperations({
         doc.text(str, data.settings.margin.left, (doc as any).internal.pageSize.getHeight() - 8);
       },
       foot: [[
-        '', '', '', '', 'Total general', formatCurrency(currencyTotal), ''
+        '', '', '', '', 'Total general', formatCurrency(currencyTotal)
       ]],
       footStyles: { fillColor: [245, 245, 245], textColor: 20, fontStyle: 'bold' }
     });
@@ -151,68 +140,68 @@ export function SalesBulkOperations({
   };
 
   const exportToExcel = async () => {
-    const XLSX = await import('xlsx');
+    const ExcelJS = await import('exceljs');
+    const workbook = new ExcelJS.Workbook();
 
+    // Main sales worksheet
+    const worksheet = workbook.addWorksheet('Ventas');
 
-    const rows = selectedSalesData.map(sale => ({
-      'N° Venta': sale.sale_number,
-      'Fecha': XLSX.SSF.format('yyyy-mm-dd', new Date(sale.date)),
-      'Cliente': sale.customer_name || 'N/A',
-      'Método de Pago': getPaymentTypeLabel(sale.payment_type) ?? 'N/A',
-      'Estado de Pago': getPaymentStatusBadge(sale.payment_status).label,
-      'Subtotal': sale.subtotal ?? 0,
-      'Total': sale.total_amount ?? 0,
-      'Cuotas': sale.number_of_installments ?? '',
-      'Monto Cuota': sale.installment_amount ?? '',
-      'Notas': sale.notes ?? ''
-    }));
-
-    const worksheet = XLSX.utils.json_to_sheet(rows);
-    const workbook = XLSX.utils.book_new();
-
-
-
-    const headers = Object.keys(rows[0] || {});
-
-
-
-    (worksheet as any)['!cols'] = [
-      { wch: 10 }, // N° Venta
-      { wch: 12 }, // Fecha
-      { wch: 24 }, // Cliente
-      { wch: 16 }, // Método
-      { wch: 16 }, // Estado
-      { wch: 12 }, // Subtotal
-      { wch: 12 }, // Total
-      { wch: 8 },  // Cuotas
-      { wch: 12 }, // Monto Cuota
-      { wch: 40 }, // Notas
+    // Define columns
+    worksheet.columns = [
+      { header: 'N° Venta', key: 'sale_number', width: 10 },
+      { header: 'Fecha', key: 'fecha', width: 12 },
+      { header: 'Cliente', key: 'cliente', width: 24 },
+      { header: 'Método de Pago', key: 'metodo', width: 16 },
+      { header: 'Estado de Pago', key: 'estado', width: 16 },
+      { header: 'Subtotal', key: 'subtotal', width: 12 },
+      { header: 'Total', key: 'total', width: 12 },
+      { header: 'Cuotas', key: 'cuotas', width: 8 },
+      { header: 'Monto Cuota', key: 'monto_cuota', width: 12 },
+      { header: 'Notas', key: 'notas', width: 40 },
     ];
 
+    // Add rows
+    selectedSalesData.forEach(sale => {
+      worksheet.addRow({
+        sale_number: sale.sale_number,
+        fecha: new Date(sale.date).toISOString().split('T')[0],
+        cliente: sale.customer_name || 'N/A',
+        metodo: getPaymentTypeLabel(sale.payment_type) ?? 'N/A',
+        estado: getPaymentStatusBadge(sale.payment_status).label,
+        subtotal: sale.subtotal ?? 0,
+        total: sale.total_amount ?? 0,
+        cuotas: sale.number_of_installments ?? '',
+        monto_cuota: sale.installment_amount ?? '',
+        notas: sale.notes ?? ''
+      });
+    });
 
-
-    (worksheet as any)['!autofilter'] = { ref: `A1:${String.fromCharCode(64 + headers.length)}1` };
-
-
-
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Ventas');
-
-
-
+    // Add summary worksheet
     const total = selectedSalesData.reduce((sum, s) => sum + (s.total_amount || 0), 0);
     const unpaid = selectedSalesData.filter(s => s.payment_status === 'unpaid').reduce((sum, s) => sum + (s.total_amount || 0), 0);
     const paid = selectedSalesData.filter(s => s.payment_status === 'paid').reduce((sum, s) => sum + (s.total_amount || 0), 0);
     const overdue = selectedSalesData.filter(s => s.payment_status === 'overdue').reduce((sum, s) => sum + (s.total_amount || 0), 0);
-    const summarySheet = XLSX.utils.aoa_to_sheet([
-      ['Resumen'],
-      ['Total general', total],
-      ['Pendiente', unpaid],
-      ['Pagado', paid],
-      ['Vencido', overdue],
-    ]);
-    XLSX.utils.book_append_sheet(workbook, summarySheet, 'Resumen');
 
-    XLSX.writeFile(workbook, `ventas_${new Date().toISOString().split('T')[0]}.xlsx`);
+    const summarySheet = workbook.addWorksheet('Resumen');
+    summarySheet.columns = [
+      { header: 'Concepto', key: 'concepto', width: 20 },
+      { header: 'Monto', key: 'monto', width: 15 }
+    ];
+
+    summarySheet.addRow({ concepto: 'Total general', monto: total });
+    summarySheet.addRow({ concepto: 'Pendiente', monto: unpaid });
+    summarySheet.addRow({ concepto: 'Pagado', monto: paid });
+    summarySheet.addRow({ concepto: 'Vencido', monto: overdue });
+
+    // Save file
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `ventas_${new Date().toISOString().split('T')[0]}.xlsx`;
+    link.click();
+    URL.revokeObjectURL(url);
   };
 
   if (selectedSales.size === 0) {
@@ -222,7 +211,7 @@ export function SalesBulkOperations({
   return (
     <>
       <div className="flex items-center gap-2 animate-in fade-in">
-        
+
         <Button
           variant="outline"
           size="sm"
@@ -233,7 +222,7 @@ export function SalesBulkOperations({
           <FileText className="h-4 w-4 mr-1" />
           PDF
         </Button>
-        
+
         <Button
           variant="outline"
           size="sm"
@@ -253,7 +242,7 @@ export function SalesBulkOperations({
         >
           Limpiar selección
         </Button>
-                <Badge variant="secondary" className="bg-primary/10 text-primary">
+        <Badge variant="secondary" className="bg-primary/10 text-primary">
           {selectedSales.size} seleccionada{selectedSales.size !== 1 ? 's' : ''}
         </Badge>
       </div>
@@ -271,8 +260,8 @@ export function SalesBulkOperations({
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancelar</AlertDialogCancel>
-            <AlertDialogAction 
-              onClick={handleBulkDelete} 
+            <AlertDialogAction
+              onClick={handleBulkDelete}
               className="bg-red-600 hover:bg-red-700 text-slate-50"
               disabled={isLoading}
             >

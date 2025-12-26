@@ -19,6 +19,7 @@ import {
 import { cn } from '@/lib/utils';
 import type { CalendarEvent } from '@/lib/calendar-types';
 import { getEventTypeColor, getEventStatusColor, formatEventTime } from '@/lib/calendar-types';
+import { formatCurrency } from '@/config/locale';
 
 interface EventListProps {
   events: CalendarEvent[];
@@ -75,14 +76,6 @@ export function EventList({
       direction = 'desc';
     }
     setSortConfig({ key, direction });
-  };
-
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('es-AR', {
-      style: 'currency',
-      currency: 'ARS',
-      minimumFractionDigits: 2
-    }).format(amount).replace('ARS', '$');
   };
 
   const getEventIcon = (type: CalendarEvent['type']) => {

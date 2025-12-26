@@ -136,25 +136,7 @@ export default function CustomersPage() {
 
   // Removed redundant useEffects that were calling loadCustomers multiple times
 
-  const highlightedCustomer = useMemo(() => {
-    if (!highlightId) return null;
-    return customers.find(customer => customer.id?.toString() === highlightId);
-  }, [customers, highlightId]);
-
-  useEffect(() => {
-    if (highlightedCustomer && highlightedCustomer.id) {
-      setTimeout(() => {
-        const element = document.getElementById(`customer-${highlightedCustomer.id}`);
-        if (element) {
-          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          element.classList.add('ring-2', 'ring-primary', 'ring-offset-2');
-          setTimeout(() => {
-            element.classList.remove('ring-2', 'ring-primary', 'ring-offset-2');
-          }, 3000);
-        }
-      }, 100);
-    }
-  }, [highlightedCustomer]);
+  // Highlighting logic moved to EnhancedCustomersTable
 
   const handleSaveCustomer = async (customerData: Omit<Customer, 'id' | 'created_at'>) => {
     try {

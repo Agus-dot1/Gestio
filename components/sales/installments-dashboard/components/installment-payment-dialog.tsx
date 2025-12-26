@@ -13,6 +13,7 @@ import { CreditCard, DollarSign, Calendar as CalendarIcon } from "lucide-react"
 import type { Installment } from "@/lib/database-operations"
 import dynamic from "next/dynamic"
 import { es } from "date-fns/locale"
+import { formatCurrency } from '@/config/locale';
 
 type PaymentMethod = "cash" | "credit_card" | "debit_card" | "bank_transfer" | "check"
 
@@ -40,8 +41,6 @@ export function InstallmentPaymentDialog({
   useEffect(() => {
     setPaymentDate(initialPaymentDate ? new Date(initialPaymentDate) : new Date())
   }, [initialPaymentDate])
-
-  const formatCurrency = (n: number) => new Intl.NumberFormat("es-AR", { style: "currency", currency: "ARS" }).format(n)
 
   const parseISOToLocalDate = (iso: string) => {
     const m = /^([0-9]{4})-([0-9]{2})-([0-9]{2})$/.exec(String(iso))

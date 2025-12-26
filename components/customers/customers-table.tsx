@@ -15,9 +15,13 @@ import { Search, MoreHorizontal, Edit, Trash2, Users, Phone, Calendar, Loader2, 
 import { Skeleton } from '@/components/ui/skeleton';
 import type { Customer, Sale } from '@/lib/database-operations';
 import { cn } from '@/lib/utils';
-import { ButtonGroup } from "@/components/ui/button-group";
-import { DropdownMenuGroup } from '@radix-ui/react-dropdown-menu';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { CustomersColumnToggle, ColumnVisibility as CustomerColumnVisibility } from '@/components/customers/customers-column-toggle';
+import { Switch } from '../ui/switch';
+import { Label } from '../ui/label';
+import { useSearchParams, useRouter, usePathname } from 'next/navigation';
+import { usePersistedState } from '@/hooks/use-persisted-state';
+import { DataTablePagination } from '../ui/data-table-pagination';
 
 interface EnhancedCustomersTableProps {
   customers: Customer[];
@@ -34,6 +38,7 @@ interface EnhancedCustomersTableProps {
     total: number;
     totalPages: number;
     currentPage: number;
+    pageSize: number;
   };
   serverSidePagination?: boolean;
   onSelectAll?: (selectAll: boolean) => void;
@@ -50,12 +55,12 @@ function formatDate(dateString: string): string {
   });
 }
 
-export function EnhancedCustomersTable({ 
-  customers, 
-  highlightId, 
-  onEdit, 
-  onDelete, 
-  onView, 
+export function EnhancedCustomersTable({
+  customers,
+  highlightId,
+  onEdit,
+  onDelete,
+  onView,
   isLoading = false,
   searchTerm: externalSearchTerm,
   onSearchChange,
@@ -68,68 +73,101 @@ export function EnhancedCustomersTable({
   onGetCustomersByIds,
   onAddCustomer
 }: EnhancedCustomersTableProps) {
-  const [internalSearchTerm, setInternalSearchTerm] = useState('');
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
+  const router = useRouter();
 
+  // 1. Initial Highlight States from localStorage
+  const [stickyHighlight, setStickyHighlight] = usePersistedState<string | null>('stickyHighlight-customers', null);
 
-  const [inputValue, setInputValue] = useState(externalSearchTerm || '');
-  const debounceRef = useRef<number | null>(null);
-  const [sortConfig, setSortConfig] = useState<{ key: keyof Customer; direction: 'asc' | 'desc' }>({ key: 'name', direction: 'asc' });
-  const [internalCurrentPage, setInternalCurrentPage] = useState(1);
-  const [selectedCustomers, setSelectedCustomers] = useState<Set<number>>(new Set());
-  const [deleteCustomer, setDeleteCustomer] = useState<Customer | null>(null);
-  const [showBulkDeleteDialog, setShowBulkDeleteDialog] = useState(false);
-  const [columnVisibility, setColumnVisibility] = useState<CustomerColumnVisibility>({
-    name: true,
-    dni: true,
-    contact: true,
-    address: true,
-    created_at: true,
-  });
+  // 2. Auto-scroll preference state
+  const [autoScrollEnabled, setAutoScrollEnabled] = usePersistedState<boolean>('gestio-auto-scroll', true);
 
+  // 3. Initial State from URL
+  const highlightIdFromUrl = searchParams.get('highlight');
 
+  // 4. Source of Truth
+  const activeHighlight = highlightIdFromUrl || stickyHighlight;
+
+  // 5. Automatic Persistence & URL Cleaning
+  useEffect(() => {
+    if (highlightIdFromUrl) {
+      setStickyHighlight(highlightIdFromUrl);
+      // Clean the URL without reloading
+      const params = new URLSearchParams(searchParams);
+      params.delete('highlight');
+      router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+    }
+  }, [highlightIdFromUrl, pathname, router, searchParams]);
+
+  const handleClearHighlight = () => {
+    setStickyHighlight(null);
+    if (highlightIdFromUrl) {
+      const params = new URLSearchParams(searchParams);
+      params.delete('highlight');
+      router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+    }
+  };
+
+  // 6. Scroll to highlighted item
+  useEffect(() => {
+    if (activeHighlight && autoScrollEnabled) {
+      const timer = setTimeout(() => {
+        const element = document.getElementById(`customer-${activeHighlight}`);
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [activeHighlight, autoScrollEnabled]);
 
   const CUSTOMERS_PERSIST_KEY = 'customersTablePrefs';
 
+  const [prefs, setPrefs] = usePersistedState<{
+    columnVisibility: CustomerColumnVisibility;
+    sortConfig: { key: keyof Customer; direction: 'asc' | 'desc' };
+    searchTerm?: string;
+  }>(CUSTOMERS_PERSIST_KEY, {
+    columnVisibility: {
+      name: true,
+      dni: true,
+      contact: true,
+      address: true,
+      created_at: true,
+    },
+    sortConfig: { key: 'name', direction: 'asc' },
+    searchTerm: '',
+  });
 
+  const columnVisibility = prefs.columnVisibility;
+  const setColumnVisibility = (value: CustomerColumnVisibility | ((curr: CustomerColumnVisibility) => CustomerColumnVisibility)) => {
+    setPrefs(prev => ({
+      ...prev,
+      columnVisibility: typeof value === 'function' ? value(prev.columnVisibility) : value
+    }));
+  };
 
-  useEffect(() => {
-    try {
-      const raw = typeof window !== 'undefined' ? localStorage.getItem(CUSTOMERS_PERSIST_KEY) : null;
-      if (raw) {
-        const prefs = JSON.parse(raw);
-        if (prefs?.columnVisibility) {
-          setColumnVisibility(prev => ({ ...prev, ...prefs.columnVisibility }));
-        }
-        if (prefs?.sortConfig) {
-          setSortConfig(prev => ({ ...prev, ...prefs.sortConfig }));
-        }
-        if (!serverSidePagination && typeof prefs?.searchTerm === 'string') {
-          setInternalSearchTerm(prefs.searchTerm);
-        }
-      }
-    } catch (e) {
-      console.warn('Failed to load customers table prefs:', e);
-    }
-  }, [serverSidePagination]);
+  const sortConfig = prefs.sortConfig;
+  const setSortConfig = (value: { key: keyof Customer; direction: 'asc' | 'desc' } | ((curr: { key: keyof Customer; direction: 'asc' | 'desc' }) => { key: keyof Customer; direction: 'asc' | 'desc' })) => {
+    setPrefs(prev => ({
+      ...prev,
+      sortConfig: typeof value === 'function' ? value(prev.sortConfig) : value
+    }));
+  };
 
-
-
-  useEffect(() => {
-    try {
-      const prefs = {
-        columnVisibility,
-        sortConfig,
-        searchTerm: serverSidePagination ? undefined : internalSearchTerm,
-      };
-      if (typeof window !== 'undefined') {
-        localStorage.setItem(CUSTOMERS_PERSIST_KEY, JSON.stringify(prefs));
-      }
-    } catch (e) {
-      console.warn('Failed to save customers table prefs:', e);
-    }
-  }, [columnVisibility, sortConfig, internalSearchTerm, serverSidePagination]);
-
-
+  const internalSearchTerm = prefs.searchTerm || '';
+  const setInternalSearchTerm = (value: string | ((curr: string) => string)) => {
+    setPrefs(prev => ({
+      ...prev,
+      searchTerm: typeof value === 'function' ? value(prev.searchTerm || '') : value
+    }));
+  };
+  const [inputValue, setInputValue] = useState(externalSearchTerm || '');
+  const debounceRef = useRef<number | null>(null);
+  const [selectedCustomers, setSelectedCustomers] = useState<Set<number>>(new Set());
+  const [deleteCustomer, setDeleteCustomer] = useState<Customer | null>(null);
+  const [showBulkDeleteDialog, setShowBulkDeleteDialog] = useState(false);
 
   const handleBulkDelete = async () => {
     const selectedIds = Array.from(selectedCustomers);
@@ -139,13 +177,12 @@ export function EnhancedCustomersTable({
     setSelectedCustomers(new Set());
     setShowBulkDeleteDialog(false);
   };
-  const itemsPerPage = 10;
 
 
 
   const searchTerm = serverSidePagination ? (externalSearchTerm || '') : internalSearchTerm;
-  const currentPage = serverSidePagination ? (externalCurrentPage || 1) : internalCurrentPage;
-  
+  const currentPage = externalCurrentPage || 1;
+
   const handleSearchChange = (term: string) => {
     if (serverSidePagination && onSearchChange) {
 
@@ -162,7 +199,6 @@ export function EnhancedCustomersTable({
       }, 300);
     } else {
       setInternalSearchTerm(term);
-      setInternalCurrentPage(1);
     }
   };
 
@@ -173,12 +209,10 @@ export function EnhancedCustomersTable({
       setInputValue(externalSearchTerm || '');
     }
   }, [externalSearchTerm, serverSidePagination]);
-  
+
   const handlePageChange = (page: number) => {
-    if (serverSidePagination && onPageChange) {
+    if (onPageChange) {
       onPageChange(page);
-    } else {
-      setInternalCurrentPage(page);
     }
   };
 
@@ -234,10 +268,7 @@ export function EnhancedCustomersTable({
 
 
 
-  const totalPages = serverSidePagination ? (paginationInfo?.totalPages || 1) : Math.ceil(sortedCustomers.length / itemsPerPage);
-  const startIndex = (currentPage - 1) * itemsPerPage;
-  const endIndex = startIndex + itemsPerPage;
-  const paginatedCustomers = serverSidePagination ? sortedCustomers : sortedCustomers.slice(startIndex, endIndex);
+  const paginatedCustomers = sortedCustomers;
 
 
 
@@ -247,7 +278,7 @@ export function EnhancedCustomersTable({
 
   const handleSelectCustomer = (customerId: number | undefined, checked: boolean) => {
     if (customerId === undefined) return;
-    
+
     const newSelected = new Set(selectedCustomers);
     if (checked) {
       newSelected.add(customerId);
@@ -298,7 +329,7 @@ export function EnhancedCustomersTable({
 
 
 
-  const isAllSelected = serverSidePagination 
+  const isAllSelected = serverSidePagination
     ? allCustomerIds.length > 0 && selectedCustomers.size === allCustomerIds.length
     : sortedCustomers.length > 0 && selectedCustomers.size === sortedCustomers.filter(c => c.id !== undefined).length;
 
@@ -397,96 +428,135 @@ export function EnhancedCustomersTable({
       selectedData = customers.filter(c => c.id && selectedCustomers.has(c.id));
     }
 
-    const XLSX = await import('xlsx');
-    const rows = selectedData.map(c => ({
-      ID: c.id ?? '',
-      Nombre: c.name,
-      DNI: c.dni || '',
-      Teléfono: c.phone || '',
-      'Teléfono 2': c.secondary_phone || '',
-      Dirección: c.address || '',
-      Notas: c.notes || '',
-      Creado: formatDate(c.created_at),
-    }));
-    const ws = XLSX.utils.json_to_sheet(rows);
-    ws['!cols'] = [
-      { wch: 6 },  // ID
-      { wch: 30 }, // Nombre
-      { wch: 14 }, // DNI
-      { wch: 28 }, // Teléfono
-      { wch: 28 }, // Teléfono 2
-      { wch: 40 }, // Dirección
-      { wch: 40 }, // Notas
-      { wch: 16 }, // Creado
+    const ExcelJS = await import('exceljs');
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Clientes');
+
+    // Define columns
+    worksheet.columns = [
+      { header: 'ID', key: 'id', width: 6 },
+      { header: 'Nombre', key: 'nombre', width: 30 },
+      { header: 'DNI', key: 'dni', width: 14 },
+      { header: 'Teléfono', key: 'telefono', width: 28 },
+      { header: 'Teléfono 2', key: 'telefono2', width: 28 },
+      { header: 'Dirección', key: 'direccion', width: 40 },
+      { header: 'Notas', key: 'notas', width: 40 },
+      { header: 'Creado', key: 'creado', width: 16 },
     ];
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Clientes');
-    XLSX.writeFile(wb, `clientes_${new Date().toISOString().split('T')[0]}.xlsx`);
+
+    // Add rows
+    selectedData.forEach(c => {
+      worksheet.addRow({
+        id: c.id ?? '',
+        nombre: c.name,
+        dni: c.dni || '',
+        telefono: c.phone || '',
+        telefono2: c.secondary_phone || '',
+        direccion: c.address || '',
+        notas: c.notes || '',
+        creado: formatDate(c.created_at),
+      });
+    });
+
+    // Save file
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `clientes_${new Date().toISOString().split('T')[0]}.xlsx`;
+    link.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
     <div className="space-y-6 short:[&_*]:text-sm short:[&>div_.rounded-md.border_table]:[&>table>thead>tr>th]:py-2 short:[&>div_.rounded-md.border_table]:[&>table>tbody>tr>td]:py-1">
       <Card>
         <CardHeader>
-          <div className="flex items-center">
-            <div className="flex items-center gap-2">
-              <div className="relative w-64">
-                <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
-                <Input
-                  placeholder="Buscar cliente..."
-                  value={serverSidePagination ? inputValue : searchTerm}
-                  onChange={(e) => handleSearchChange(e.target.value)}
-                  className="pl-8 rounded-xl"
-                />
-              </div>
-              <CustomersColumnToggle
-                columnVisibility={columnVisibility}
-                onColumnVisibilityChange={setColumnVisibility}
-              />
-              {selectedCustomers.size > 0 && (
-                <div className="flex items-center gap-2 mr-4 animate-in fade-in">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={exportToPDF}
-                    className="h-8"
-                    disabled={isLoading}
-                  >
-                    <FileText className="h-4 w-4 mr-1" />
-                    PDF
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={exportToExcel}
-                    className="h-8"
-                    disabled={isLoading}
-                  >
-                    <Download className="h-4 w-4 mr-1" />
-                    Excel
-                  </Button>
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    onClick={() => setShowBulkDeleteDialog(true)}
-                    className="h-8"
-                    disabled={isLoading}
-                  >
-                    <Trash2 className="h-4 w-4 mr-1" />
-                    Eliminar
-                  </Button>
-                  <Badge variant="secondary" className="bg-primary/10 text-primary">
-                    {selectedCustomers.size} seleccionado{selectedCustomers.size !== 1 ? 's' : ''}
-                  </Badge>
+          <div className="flex flex-col gap-4">
+            {activeHighlight && (
+              <div className="p-2 bg-primary/10 border border-primary/20 rounded-lg flex items-center justify-between animate-in fade-in slide-in-from-top-2">
+                <div className="flex items-center gap-2 text-sm text-primary font-medium">
+                  <Search className="h-4 w-4" />
+                  <span>Cliente resaltado (ID: {activeHighlight})</span>
                 </div>
-              )}
+                <div className="flex gap-4 items-center">
+                  <div className="flex items-center gap-2 px-3 border-r border-primary/20">
+                    <Switch
+                      id="auto-scroll-customers"
+                      checked={autoScrollEnabled}
+                      onCheckedChange={setAutoScrollEnabled}
+                    />
+                    <Label htmlFor="auto-scroll-customers" className="text-[10px] uppercase font-bold tracking-wider opacity-70 cursor-pointer whitespace-nowrap">
+                      Auto-scroll
+                    </Label>
+                  </div>
+                  <Button size="sm" variant="ghost" onClick={handleClearHighlight} className="h-8">
+                    Quitar resalte
+                  </Button>
+                </div>
+              </div>
+            )}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="relative w-64">
+                  <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    placeholder="Buscar cliente..."
+                    value={serverSidePagination ? inputValue : searchTerm}
+                    onChange={(e) => handleSearchChange(e.target.value)}
+                    className="pl-8 rounded-xl"
+                  />
+                </div>
+                <CustomersColumnToggle
+                  columnVisibility={columnVisibility}
+                  onColumnVisibilityChange={setColumnVisibility}
+                />
+                {selectedCustomers.size > 0 && (
+                  <div className="flex items-center gap-2 mr-4 animate-in fade-in">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={exportToPDF}
+                      className="h-8"
+                      disabled={isLoading}
+                    >
+                      <FileText className="h-4 w-4 mr-1" />
+                      PDF
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={exportToExcel}
+                      className="h-8"
+                      disabled={isLoading}
+                    >
+                      <Download className="h-4 w-4 mr-1" />
+                      Excel
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => setShowBulkDeleteDialog(true)}
+                      className="h-8"
+                      disabled={isLoading}
+                    >
+                      <Trash2 className="h-4 w-4 mr-1" />
+                      Eliminar
+                    </Button>
+                    <Badge variant="secondary" className="bg-primary/10 text-primary">
+                      {selectedCustomers.size} seleccionado{selectedCustomers.size !== 1 ? 's' : ''}
+                    </Badge>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
             {isLoading ? (
-              <div className="rounded-md border">
+              <div className="rounded-xl border">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -590,7 +660,7 @@ export function EnhancedCustomersTable({
                 </div>
               )
             ) : (
-              <div className="rounded-md border">
+              <div className="rounded-xl border">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -632,11 +702,14 @@ export function EnhancedCustomersTable({
                   </TableHeader>
                   <TableBody>
                     {paginatedCustomers.map((customer) => (
-                      <TableRow 
+                      <TableRow
                         key={customer.id}
+                        id={`customer-${customer.id}`}
                         className={cn(
-                          highlightId === customer.id?.toString() && "bg-muted/50"
+                          "transition-colors relative",
+                          activeHighlight === customer.id?.toString() && "bg-primary/5 hover:bg-primary/10 after:absolute after:left-0 after:top-0 after:bottom-0 after:w-1 after:bg-primary"
                         )}
+                        aria-current={activeHighlight === customer.id?.toString() ? "true" : undefined}
                       >
                         <TableCell>
                           <Checkbox
@@ -682,12 +755,52 @@ export function EnhancedCustomersTable({
                         {columnVisibility.created_at && (
                           <TableCell>{customer.created_at ? formatDate(customer.created_at) : '-'}</TableCell>
                         )}
-                        <TableCell className="flex p-2">
-                          <ButtonGroup>
-                            <Button variant="outline" size="sm"  onClick={() => onView(customer)}>Ver detalles</Button>
-                            <Button variant="secondary" size="sm" onClick={() => onEdit(customer)}>Editar</Button>
-                            <Button variant="destructive" size="sm" onClick={() => setDeleteCustomer(customer)}>Eliminar</Button>
-                          </ButtonGroup>
+                        <TableCell className="text-right">
+                          <TooltipProvider>
+                            <div className="flex items-center justify-end gap-1">
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-9 w-9 text-muted-foreground hover:text-primary"
+                                    onClick={() => onView(customer)}
+                                  >
+                                    <Eye className="h-5 w-5" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Ver detalles</TooltipContent>
+                              </Tooltip>
+
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-9 w-9 text-muted-foreground hover:text-primary"
+                                    onClick={() => onEdit(customer)}
+                                  >
+                                    <Edit className="h-5 w-5" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Editar cliente</TooltipContent>
+                              </Tooltip>
+
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-9 w-9 text-red-500 hover:text-red-600"
+                                    onClick={() => setDeleteCustomer(customer)}
+                                  >
+                                    <Trash2 className="h-5 w-5" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Eliminar cliente</TooltipContent>
+                              </Tooltip>
+                            </div>
+                          </TooltipProvider>
                         </TableCell>
                       </TableRow>
                     ))}
@@ -697,56 +810,15 @@ export function EnhancedCustomersTable({
             )}
           </div>
 
-          {!isLoading && (serverSidePagination ? (paginationInfo?.totalPages || 0) > 1 : sortedCustomers.length > itemsPerPage) && (
-            <div className="flex items-center justify-between px-2 py-4">
-              <div className="text-sm text-muted-foreground">
-                {serverSidePagination ? (
-                  `Mostrando ${((currentPage - 1) * itemsPerPage) + 1} a ${Math.min(currentPage * itemsPerPage, paginationInfo?.total || 0)} de ${paginationInfo?.total || 0} clientes`
-                ) : (
-                  `Mostrando ${startIndex + 1} a ${Math.min(endIndex, sortedCustomers.length)} de ${sortedCustomers.length} clientes`
-                )}
-              </div>
-              <div className="flex items-center space-x-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handlePageChangeWithClear(currentPage - 1)}
-                  disabled={currentPage === 1}
-                >
-                  Anterior
-                </Button>
-                <div className="flex items-center space-x-1">
-                  {Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => {
-                    const showPage = page === 1 || page === totalPages || (page >= currentPage - 1 && page <= currentPage + 1);
-                    if (!showPage) {
-                      if (page === currentPage - 2 || page === currentPage + 2) {
-                        return <span key={page} className="px-2 text-muted-foreground">...</span>;
-                      }
-                      return null;
-                    }
-                    return (
-                      <Button
-                        key={page}
-                        variant={currentPage === page ? "default" : "outline"}
-                        size="sm"
-                        onClick={() => handlePageChangeWithClear(page)}
-                        className="w-8 h-8 p-0"
-                      >
-                        {page}
-                      </Button>
-                    );
-                  })}
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handlePageChangeWithClear(currentPage + 1)}
-                  disabled={currentPage === totalPages}
-                >
-                  Siguiente
-                </Button>
-              </div>
-            </div>
+          {paginationInfo && (
+            <DataTablePagination
+              total={paginationInfo.total}
+              totalPages={paginationInfo.totalPages}
+              currentPage={paginationInfo.currentPage}
+              pageSize={paginationInfo.pageSize}
+              onPageChange={handlePageChange}
+              entityName="clientes"
+            />
           )}
         </CardContent>
       </Card>

@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { AlertCircle, Package, DollarSign, Tag, Hash, Box } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Product } from '@/lib/database-operations';
+import { usePersistedState } from '@/hooks/use-persisted-state';
 
 interface ProductFormProps {
   product?: Product;
@@ -31,7 +32,7 @@ export function ProductForm({ product, open, onOpenChange, onSave }: ProductForm
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [isExcelLayout, setIsExcelLayout] = useState(false);
+  const [isExcelLayout] = usePersistedState<boolean>('excelFormLayout', false);
 
   useEffect(() => {
     setFormData({
@@ -45,21 +46,6 @@ export function ProductForm({ product, open, onOpenChange, onSave }: ProductForm
     });
   }, [product]);
 
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem('excelFormLayout');
-      setIsExcelLayout(saved === 'true');
-    } catch { }
-
-    const handler = (e: any) => {
-      const detail = e?.detail || {};
-      if (Object.prototype.hasOwnProperty.call(detail, 'excelFormLayout')) {
-        setIsExcelLayout(Boolean(detail.excelFormLayout));
-      }
-    };
-    window.addEventListener('app:settings-changed', handler);
-    return () => window.removeEventListener('app:settings-changed', handler);
-  }, []);
 
   const validateForm = () => {
     const newErrors: Record<string, string> = {};

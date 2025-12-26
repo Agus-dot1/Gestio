@@ -196,22 +196,18 @@ function createTray() {
     }
 }
 function createWindow() {
+    // Preload is now a .ts file compiled to .js in the same folder or parent folder
     const preloadCandidates = [
-        path.join(process.cwd(), 'electron', 'preload.js'),
+        path.join(__dirname, 'preload.js'),
         path.join(__dirname, '../preload.js'),
-        path.join(__dirname, '../../preload.js')
+        path.join(electron_1.app.getAppPath(), 'dist/electron/electron/preload.js'),
+        path.join(electron_1.app.getAppPath(), 'dist/electron/preload.js'),
     ];
-    let resolvedPreload = preloadCandidates.find(p => {
-        try {
-            return fs.existsSync(p);
-        }
-        catch {
-            return false;
-        }
-    });
+    let resolvedPreload = preloadCandidates.find(p => fs.existsSync(p));
+    console.log('Resolved Preload Path:', resolvedPreload);
     if (!resolvedPreload) {
-        // fallback to cwd path
-        resolvedPreload = path.join(process.cwd(), 'electron', 'preload.js');
+        // Fallback consistent with current structure
+        resolvedPreload = path.join(__dirname, '../preload.js');
     }
     mainWindow = new electron_1.BrowserWindow({
         width: 1200,
@@ -233,9 +229,9 @@ function createWindow() {
     mainWindow.setMinimumSize(800, 600);
     mainWindow.setSize(1200, 800);
     if (isDev) {
+        mainWindow.webContents.openDevTools();
         const devUrl = process.env.ELECTRON_DEV_URL || 'http://localhost:3001';
         mainWindow.loadURL(devUrl);
-        mainWindow.webContents.openDevTools();
     }
     else {
         mainWindow.loadFile(path.join(__dirname, '../../../out/index.html'));
@@ -321,6 +317,7 @@ function setupIpcHandlers() {
     electron_1.ipcMain.handle('products:deleteAll', () => database_operations_1.productOperations.deleteAll());
     electron_1.ipcMain.handle('sales:getAll', () => database_operations_1.saleOperations.getAll());
     electron_1.ipcMain.handle('sales:getPaginated', (_, page, pageSize, searchTerm) => database_operations_1.saleOperations.getPaginated(page, pageSize, searchTerm));
+    electron_1.ipcMain.handle('sales:getPageNumber', (_, saleId, pageSize, searchTerm) => database_operations_1.saleOperations.getSalePageNumber(saleId, pageSize, searchTerm));
     electron_1.ipcMain.handle('sales:search', (_, searchTerm, limit) => database_operations_1.saleOperations.search(searchTerm, limit));
     electron_1.ipcMain.handle('sales:getById', (_, id) => database_operations_1.saleOperations.getById(id));
     electron_1.ipcMain.handle('sales:getByCustomer', (_, customerId) => database_operations_1.saleOperations.getByCustomer(customerId));
@@ -350,6 +347,7 @@ function setupIpcHandlers() {
     electron_1.ipcMain.handle('sales:getStatsComparison', () => database_operations_1.saleOperations.getStatsComparison());
     electron_1.ipcMain.handle('sales:deleteAll', () => database_operations_1.saleOperations.deleteAll());
     electron_1.ipcMain.handle('installments:getBySale', (_, saleId) => database_operations_1.installmentOperations.getBySale(saleId));
+    electron_1.ipcMain.handle('installments:getAll', () => database_operations_1.installmentOperations.getAll());
     electron_1.ipcMain.handle('installments:getOverdue', () => database_operations_1.installmentOperations.getOverdue());
     electron_1.ipcMain.handle('installments:getUpcoming', (_, limit) => database_operations_1.installmentOperations.getUpcoming(limit));
     electron_1.ipcMain.handle('installments:create', (_, installment) => database_operations_1.installmentOperations.create(installment));
@@ -431,6 +429,24 @@ function setupIpcHandlers() {
         broadcastDatabaseChange('calendar', 'delete', { id });
         return res;
     });
+    electron_1.ipcMain.handle('invoices:create', (_, invoice) => {
+        const res = database_operations_1.invoiceOperations.create(invoice);
+        broadcastDatabaseChange('invoices', 'create', { id: res });
+        return res;
+    });
+    electron_1.ipcMain.handle('invoices:update', (_, id, invoice) => {
+        const res = database_operations_1.invoiceOperations.update(id, invoice);
+        broadcastDatabaseChange('invoices', 'update', { id });
+        return res;
+    });
+    electron_1.ipcMain.handle('invoices:delete', (_, id) => {
+        const res = database_operations_1.invoiceOperations.delete(id);
+        broadcastDatabaseChange('invoices', 'delete', { id });
+        return res;
+    });
+    electron_1.ipcMain.handle('invoices:getBySaleId', (_, saleId) => database_operations_1.invoiceOperations.getBySaleId(saleId));
+    electron_1.ipcMain.handle('invoices:getAllWithDetails', () => database_operations_1.invoiceOperations.getAllWithDetails());
+    electron_1.ipcMain.handle('invoices:getNextInvoiceNumber', () => database_operations_1.invoiceOperations.getNextInvoiceNumber());
     const coerceNumber = (v, fallback = 0) => {
         const n = typeof v === 'string' ? parseFloat(v) : v;
         return Number.isFinite(n) ? Number(n) : fallback;
@@ -682,6 +698,19 @@ function setupIpcHandlers() {
             return { success: false, error: error instanceof Error ? error.message : 'Error desconocido' };
         }
     });
+    electron_1.ipcMain.handle('utils:getDesktopPath', () => {
+        return electron_1.app.getPath('desktop');
+    });
+    electron_1.ipcMain.handle('utils:saveFile', async (_, { filePath, buffer }) => {
+        try {
+            fs.writeFileSync(filePath, Buffer.from(buffer));
+            return true;
+        }
+        catch (e) {
+            console.error('Error saving file:', e);
+            return false;
+        }
+    });
     electron_1.ipcMain.handle('db:deleteAll', async () => {
         try {
             await database_operations_1.saleOperations.deleteAll();
@@ -746,12 +775,19 @@ electron_1.app.whenReady().then(() => {
     }
     electron_1.session.defaultSession.protocol.interceptBufferProtocol('file', (request, callback) => {
         const url = request.url;
-        if (url.includes('index.txt') && url.includes('_rsc=')) {
+        // Handle Next.js RSC (React Server Components) requests (.txt files with _rsc query)
+        if (url.includes('.txt') && url.includes('_rsc=')) {
             console.log('Intercepted RSC request:', url);
             let rscPath = url.replace('file:///', '');
             rscPath = decodeURIComponent(rscPath);
             const [pathOnly] = rscPath.split('?');
-            const relativePath = pathOnly.replace(/^[A-Za-z]:/, '');
+            // On Windows, the path might be D:/path/to/out/filename.txt
+            // We want to isolate 'filename.txt' or whatever comes after the 'out' directory
+            const pathParts = pathOnly.split('/');
+            const outIndex = pathParts.lastIndexOf('out');
+            const relativePath = outIndex !== -1
+                ? pathParts.slice(outIndex + 1).join(path.sep)
+                : pathOnly.replace(/^[A-Za-z]:/, '').replace(/^\/+/, '').replace(/\//g, path.sep);
             const appPath = path.join(__dirname, '../../../', 'out');
             const fullPath = path.join(appPath, relativePath.replace(/\//g, path.sep));
             console.log('Mapped RSC path:', fullPath);
@@ -759,11 +795,7 @@ electron_1.app.whenReady().then(() => {
                 try {
                     const rscContent = fs.readFileSync(fullPath);
                     callback({
-                        statusCode: 200,
-                        headers: {
-                            'Content-Type': 'text/plain',
-                            'Access-Control-Allow-Origin': '*'
-                        },
+                        mimeType: 'text/plain',
                         data: rscContent
                     });
                     return;
@@ -773,11 +805,7 @@ electron_1.app.whenReady().then(() => {
                 }
             }
             callback({
-                statusCode: 200,
-                headers: {
-                    'Content-Type': 'text/plain',
-                    'Access-Control-Allow-Origin': '*'
-                },
+                mimeType: 'text/plain',
                 data: Buffer.from('')
             });
             return;
@@ -785,9 +813,16 @@ electron_1.app.whenReady().then(() => {
         let filePath = url.replace('file:///', '');
         filePath = decodeURIComponent(filePath);
         const rootPathCandidate = filePath.replace(/^[A-Za-z]:/, '');
-        if (rootPathCandidate.startsWith('/_next') || rootPathCandidate.startsWith('/static')) {
-            const assetRelative = rootPathCandidate.replace(/^\//, '');
-            filePath = path.join(__dirname, '../../../', 'out', assetRelative.replace(/\//g, path.sep));
+        const appOutPath = path.join(__dirname, '../../../', 'out');
+        // Robust path resolution: try to isolate the part of the path relative to 'out'
+        const pathParts = rootPathCandidate.split(/[\/\\]/);
+        const outIndex = pathParts.lastIndexOf('out');
+        const relativePath = outIndex !== -1
+            ? pathParts.slice(outIndex + 1).join(path.sep)
+            : rootPathCandidate.replace(/^\/+/, '').replace(/\//g, path.sep);
+        const candidatePath = path.join(appOutPath, relativePath);
+        if (rootPathCandidate.includes('_next') || rootPathCandidate.includes('static') || fs.existsSync(candidatePath)) {
+            filePath = candidatePath;
         }
         const hasExtension = path.extname(filePath) !== '';
         const isDirectoryPath = filePath.endsWith('/') || !hasExtension;
@@ -905,13 +940,13 @@ electron_1.app.on('web-contents-created', (event, contents) => {
         return { action: 'deny' };
     });
 });
-electron_1.ipcMain.handle('open-external', async (_event, url) => {
+electron_1.ipcMain.handle('app:openExternal', async (_event, url) => {
     try {
         await electron_1.shell.openExternal(url);
         return true;
     }
     catch (err) {
-        console.error('open-external failed:', err);
+        console.error('app:openExternal failed:', err);
         return false;
     }
 });

@@ -29,6 +29,7 @@ import {
 import { cn } from '@/lib/utils';
 import type { CalendarEvent, EventType, EventStatus } from '@/lib/calendar-types';
 import { getEventTypeColor, getEventStatusColor } from '@/lib/calendar-types';
+import { formatCurrency } from '@/config/locale';
 
 interface EventDialogProps {
   event: CalendarEvent | null;
@@ -81,13 +82,6 @@ export function EventDialog({ event, open, onOpenChange, onSave, onDelete }: Eve
     }
   }, [event]);
 
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('es-AR', {
-      style: 'currency',
-      currency: 'ARS',
-      minimumFractionDigits: 2
-    }).format(amount).replace('ARS', '$');
-  };
 
   const formatDate = (date: Date) => {
     return date.toLocaleDateString('es-ES', {

@@ -1,4 +1,4 @@
-import { Installment } from './database-operations';
+import { Installment } from '../database-operations';
 
 /**
  * Valida que el pago de una cuota sea secuencial: no se permite pagar una cuota

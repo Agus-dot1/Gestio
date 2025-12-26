@@ -31,12 +31,20 @@ import {
   ChartContainer,
   ChartTooltip,
   ChartTooltipContent,
+  ChartLegend,
+  ChartLegendContent,
 } from "@/components/ui/chart";
 import {
   AreaChart as ReAreaChart,
   Area,
   XAxis,
-  CartesianGrid
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  Cell
 } from "recharts";
 import {
   Select,
@@ -68,9 +76,15 @@ type Customer = {
 export default function Home() {
   const router = useRouter();
   const { prefetchAllRoutes } = useRoutePrefetch();
-  const [isElectron] = useState(() => typeof window !== 'undefined' && !!window.electronAPI);
+  const [isElectron, setIsElectron] = useState(false);
+  const [mounted, setMounted] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+    setIsElectron(typeof window !== 'undefined' && !!window.electronAPI);
+  }, []);
   const [stats, setStats] = useState({
     totalCustomers: 0,
     totalProducts: 0,
@@ -89,6 +103,8 @@ export default function Home() {
     products: { current: number, previous: number, percentage: number }
   } | null>(null);
   const [isChartExpanded, setIsChartExpanded] = useState(false);
+  const [chartMode, setChartMode] = useState<'sales' | 'installments'>('sales');
+  const [isChartLoading, setIsChartLoading] = useState(false);
 
 
 
@@ -129,66 +145,6 @@ export default function Home() {
           return true;
         }).slice(0, 5);
         setUpcomingInstallments(dedupedByCustomer);
-        try {
-          const allSales = await window.electronAPI.database.sales.getAll();
-          const cutoff = chartRange === 'all' ? new Date(0) : new Date(Date.now() - chartRange * 24 * 60 * 60 * 1000);
-          const buckets = new Map<string, { sales: number; revenue: number }>();
-          for (const s of allSales) {
-            const dt = new Date(s.date || s.created_at || Date.now());
-            if (dt < cutoff) continue;
-            const key = dt.toISOString().slice(0, 10);
-            let revenue = Number(s.total_amount || 0);
-            if (!(revenue > 0) && s.id) {
-              try {
-                const saleItems = await window.electronAPI.database.saleItems.getBySale(s.id);
-                revenue = Array.isArray(saleItems)
-                  ? saleItems.reduce((acc: number, it: any) => acc + (Number(it.line_total ?? (Number(it.quantity || 0) * Number(it.unit_price || 0))) || 0), 0)
-                  : 0;
-              } catch { }
-            }
-            const prev = buckets.get(key) || { sales: 0, revenue: 0 };
-            buckets.set(key, { sales: prev.sales + 1, revenue: prev.revenue + revenue });
-          }
-          const chart = Array.from(buckets.entries()).sort((a, b) => a[0] < b[0] ? -1 : 1).map(([date, v]) => ({ date, sales: v.sales, revenue: v.revenue }));
-          setChartData(chart);
-
-          // Compute comparisons for cards
-          const monthKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-          const nowD = new Date();
-          const currentKey = monthKey(nowD);
-          const prevD = new Date(nowD.getFullYear(), nowD.getMonth() - 1, 1);
-          const prevKey = monthKey(prevD);
-          let currentRevenue = 0, previousRevenue = 0, currentSalesCount = 0, previousSalesCount = 0;
-          for (const s of allSales) {
-            const dt = new Date(s.date || s.created_at || Date.now());
-            const key = monthKey(dt);
-            let rev = Number(s.total_amount || 0);
-            if (!(rev > 0) && s.id) {
-              try {
-                const saleItems = await window.electronAPI.database.saleItems.getBySale(s.id);
-                rev = Array.isArray(saleItems) ? saleItems.reduce((acc: number, it: any) => acc + (Number(it.line_total ?? (Number(it.quantity || 0) * Number(it.unit_price || 0))) || 0), 0) : 0;
-              } catch { }
-            }
-            if (key === currentKey) { currentRevenue += rev; currentSalesCount += 1; }
-            else if (key === prevKey) { previousRevenue += rev; previousSalesCount += 1; }
-          }
-          const pct = (curr: number, prev: number) => prev === 0 ? (curr > 0 ? 100 : 0) : ((curr - prev) / prev) * 100;
-          const salesPct = pct(currentSalesCount, previousSalesCount);
-          const revenuePct = pct(currentRevenue, previousRevenue);
-
-          const custChange = customersComparison ? (customersComparison.previous === 0 ? (customersComparison.current > 0 ? 100 : 0) : customersComparison.change) : 0;
-          const prodChange = productsComparison ? (productsComparison.previous === 0 ? (productsComparison.current > 0 ? 100 : 0) : productsComparison.change) : 0;
-          setStatsComparison({
-            sales: { current: currentSalesCount, previous: previousSalesCount, percentage: salesPct },
-            revenue: { current: currentRevenue, previous: previousRevenue, percentage: revenuePct },
-            customers: { current: customersComparison.current, previous: customersComparison.previous, percentage: custChange },
-            products: { current: productsComparison.current, previous: productsComparison.previous, percentage: prodChange },
-          });
-        } catch {
-          setChartData(salesChartData);
-        }
-
-
         setTimeout(() => {
           prefetchAllRoutes();
         }, 500);
@@ -212,34 +168,71 @@ export default function Home() {
     } finally {
       setIsLoading(false);
     }
-  }, [prefetchAllRoutes]);
+  }, [prefetchAllRoutes]); // Removed chartRange to prevent full page reload on period change
 
   const refreshChartOnly = useCallback(async () => {
     if (!window.electronAPI) return;
+    setIsChartLoading(true);
     try {
-      const allSales = await window.electronAPI.database.sales.getAll();
-      const cutoff = chartRange === 'all' ? new Date(0) : new Date(Date.now() - (chartRange as number) * 24 * 60 * 60 * 1000);
-      const buckets = new Map<string, { sales: number; revenue: number }>();
-      for (const s of allSales) {
-        const dt = new Date(s.date || s.created_at || Date.now());
-        if (dt < cutoff) continue;
-        const key = dt.toISOString().slice(0, 10);
-        let revenue = Number(s.total_amount || 0);
-        if (!(revenue > 0) && s.id) {
-          try {
-            const saleItems = await window.electronAPI.database.saleItems.getBySale(s.id);
-            revenue = Array.isArray(saleItems)
-              ? saleItems.reduce((acc: number, it: any) => acc + (Number(it.line_total ?? (Number(it.quantity || 0) * Number(it.unit_price || 0))) || 0), 0)
-              : 0;
-          } catch { }
+      if (chartMode === 'sales') {
+        const allSales = await window.electronAPI.database.sales.getAll();
+        const cutoff = chartRange === 'all' ? new Date(0) : new Date(Date.now() - (chartRange as number) * 24 * 60 * 60 * 1000);
+        const buckets = new Map<string, { sales: number; revenue: number }>();
+        for (const s of allSales) {
+          const dt = new Date(s.date || s.created_at || Date.now());
+          if (dt < cutoff) continue;
+          const key = dt.toISOString().slice(0, 10);
+          let revenue = Number(s.total_amount || 0);
+          if (!(revenue > 0) && s.id) {
+            try {
+              const saleItems = await window.electronAPI.database.saleItems.getBySale(s.id);
+              revenue = Array.isArray(saleItems)
+                ? saleItems.reduce((acc: number, it: any) => acc + (Number(it.line_total ?? (Number(it.quantity || 0) * Number(it.unit_price || 0))) || 0), 0)
+                : 0;
+            } catch { }
+          }
+          const prev = buckets.get(key) || { sales: 0, revenue: 0 };
+          buckets.set(key, { sales: prev.sales + 1, revenue: prev.revenue + revenue });
         }
-        const prev = buckets.get(key) || { sales: 0, revenue: 0 };
-        buckets.set(key, { sales: prev.sales + 1, revenue: prev.revenue + revenue });
+        const chart = Array.from(buckets.entries()).sort((a, b) => a[0] < b[0] ? -1 : 1).map(([date, v]) => ({ date, sales: v.sales, revenue: v.revenue }));
+        setChartData(chart);
+      } else {
+        // Installments mode
+        const allInstallments = await window.electronAPI.database.installments.getAll();
+        const cutoff = chartRange === 'all' ? new Date(0) : new Date(Date.now() - (chartRange as number) * 24 * 60 * 60 * 1000);
+        const buckets = new Map<string, { count: number; balance: number }>();
+
+        for (const inst of allInstallments) {
+          const dt = new Date(inst.due_date || Date.now());
+          if (dt < cutoff) continue;
+          const key = dt.toISOString().slice(0, 10);
+
+          const prev = buckets.get(key) || { count: 0, balance: 0 };
+          buckets.set(key, {
+            count: prev.count + 1,
+            balance: prev.balance + Number(inst.balance || 0)
+          });
+        }
+
+        const chart = Array.from(buckets.entries())
+          .sort((a, b) => a[0] < b[0] ? -1 : 1)
+          .map(([date, v]) => ({
+            date,
+            sales: v.count, // Using the same keys for simplicity in the generic chart UI
+            revenue: v.balance
+          }));
+        setChartData(chart);
       }
-      const chart = Array.from(buckets.entries()).sort((a, b) => a[0] < b[0] ? -1 : 1).map(([date, v]) => ({ date, sales: v.sales, revenue: v.revenue }));
-      setChartData(chart);
-    } catch { }
-  }, [chartRange]);
+    } catch (e) {
+      console.error("Error refreshing chart:", e);
+    } finally {
+      setIsChartLoading(false);
+    }
+  }, [chartRange, chartMode]);
+
+  useEffect(() => {
+    refreshChartOnly();
+  }, [refreshChartOnly]);
 
   useEffect(() => {
     if (isElectron) {
@@ -295,7 +288,7 @@ export default function Home() {
   return (
     <DashboardLayout>
       <div className="p-8 pb-12">
-        {isElectron && (
+        {mounted && isElectron && (
           <div className="flex items-center justify-end gap-2 mb-6 text-xs text-green-500/80 font-medium">
             <Database className="h-3 w-3" />
             <span>Base de datos conectada</span>
@@ -400,16 +393,35 @@ export default function Home() {
             <CardHeader className="pb-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <CardTitle className="text-base font-bold">Ventas e Ingresos</CardTitle>
-                  <CardDescription>Resumen del rendimiento comercial</CardDescription>
+                  <CardTitle className="text-base font-bold">
+                    {chartMode === 'sales' ? 'Rendimiento de Ventas' : 'Rendimiento de Cuotas'}
+                  </CardTitle>
+                  <CardDescription>
+                    {chartMode === 'sales'
+                      ? 'Seguimiento de ingresos y volumen de ventas'
+                      : 'Análisis de cuotas vencidas y saldos pendientes'}
+                  </CardDescription>
                 </div>
                 <div className="flex items-center gap-2">
+                  <Select
+                    value={chartMode}
+                    onValueChange={(v: 'sales' | 'installments') => setChartMode(v)}
+                  >
+                    <SelectTrigger className="w-[140px] h-9 rounded-xl bg-muted/50 border-none shadow-none font-medium">
+                      <SelectValue placeholder="Modo" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="sales">Ventas</SelectItem>
+                      <SelectItem value="installments">Cuotas</SelectItem>
+                    </SelectContent>
+                  </Select>
+
+                  <div className="w-[1px] h-4 bg-border mx-1" />
                   <Select
                     value={String(chartRange)}
                     onValueChange={(v) => {
                       const val = v === 'all' ? 'all' : Number(v) as 7 | 30 | 90;
                       setChartRange(val);
-                      refreshChartOnly();
                     }}
                   >
                     <SelectTrigger className="w-[160px] h-9 rounded-xl">
@@ -432,46 +444,155 @@ export default function Home() {
                     {isChartExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
                   </Button>
 
-                  <Button variant="outline" size="icon" className="h-9 w-9 rounded-xl">
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="h-9 w-9 rounded-xl"
+                    onClick={() => {
+                      if (chartData.length === 0) return;
+                      const headers = ["Fecha", "Ventas", "Ingresos"];
+                      const csvContent = [
+                        headers.join(","),
+                        ...chartData.map(d => `${d.date},${d.sales},${d.revenue}`)
+                      ].join("\n");
+                      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                      const url = URL.createObjectURL(blob);
+                      const link = document.createElement("a");
+                      link.setAttribute("href", url);
+                      link.setAttribute("download", `reporte_ventas_${chartRange}.csv`);
+                      link.style.visibility = 'hidden';
+                      document.body.appendChild(link);
+                      link.click();
+                      document.body.removeChild(link);
+                    }}
+                  >
                     <Download className="h-4 w-4" />
                   </Button>
                 </div>
               </div>
             </CardHeader>
-            <CardContent>
+            <CardContent className="relative">
               <ChartContainer
                 config={{
-                  revenue: { label: 'Ingresos', color: 'hsl(var(--primary))' },
+                  revenue: {
+                    label: chartMode === 'sales' ? 'Ingresos' : 'Saldo total',
+                    color: 'hsl(var(--primary))'
+                  },
+                  sales: {
+                    label: chartMode === 'sales' ? 'Ventas' : 'Cant. Cuotas',
+                    color: 'hsl(var(--chart-2, 160 60% 45%))'
+                  },
                 }}
                 className={cn("w-full transition-all duration-300", isChartExpanded ? "h-[450px]" : "h-[300px]")}
               >
-                <ReAreaChart data={chartData} margin={{ left: 0, right: 0, top: 10, bottom: 0 }}>
+                <ReAreaChart
+                  data={chartData.length > 0 ? chartData : [{ date: "2024-01-01", sales: 0, revenue: 0 }]}
+                  margin={{ left: 10, right: 10, top: 20, bottom: 0 }}
+                >
                   <defs>
                     <linearGradient id="colorRevenue" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="hsl(var(--primary))" stopOpacity={0.3} />
                       <stop offset="95%" stopColor="hsl(var(--primary))" stopOpacity={0} />
                     </linearGradient>
+                    <linearGradient id="colorSales" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="hsl(var(--chart-2, 160 60% 45%))" stopOpacity={0.3} />
+                      <stop offset="95%" stopColor="hsl(var(--chart-2, 160 60% 45%))" stopOpacity={0} />
+                    </linearGradient>
                   </defs>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} opacity={0.1} />
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} opacity={0.05} />
                   <XAxis
                     dataKey="date"
                     tickLine={false}
                     axisLine={false}
                     tickMargin={12}
                     fontSize={11}
-                    tickFormatter={(val) => new Date(val).toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })}
+                    tickFormatter={(val) => {
+                      const date = new Date(val);
+                      return date.toLocaleDateString('es-ES', {
+                        day: 'numeric',
+                        month: chartRange === 7 ? 'short' : 'numeric'
+                      });
+                    }}
                   />
-                  <ChartTooltip content={<ChartTooltipContent nameKey="revenue" />} />
+                  <YAxis
+                    yAxisId="left"
+                    tickLine={false}
+                    axisLine={false}
+                    fontSize={11}
+                    tickFormatter={(val) => val >= 1000 ? `$${(val / 1000).toFixed(0)}k` : `$${val}`}
+                    width={45}
+                  />
+                  <YAxis
+                    yAxisId="right"
+                    orientation="right"
+                    tickLine={false}
+                    axisLine={false}
+                    fontSize={11}
+                    tickFormatter={(val) => Math.floor(val).toString()}
+                    width={25}
+                    hide={!isChartExpanded}
+                  />
+                  <ChartTooltip
+                    cursor={{ stroke: 'hsl(var(--muted-foreground))', strokeWidth: 1, strokeDasharray: '4 4' }}
+                    content={
+                      <ChartTooltipContent
+                        labelFormatter={(value) => new Date(value).toLocaleDateString('es-ES', {
+                          weekday: 'long',
+                          year: 'numeric',
+                          month: 'long',
+                          day: 'numeric'
+                        })}
+                        formatter={(value, name) => (
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold">
+                              {name === 'revenue' ? formatCurrency(Number(value)) : `${value} ventas`}
+                            </span>
+                          </div>
+                        )}
+                      />
+                    }
+                  />
                   <Area
+                    yAxisId="left"
                     type="monotone"
                     dataKey="revenue"
+                    name="revenue"
                     stroke="hsl(var(--primary))"
-                    strokeWidth={2.5}
+                    strokeWidth={3}
                     fillOpacity={1}
                     fill="url(#colorRevenue)"
+                    activeDot={{ r: 6, strokeWidth: 0 }}
                   />
+                  <Area
+                    yAxisId="right"
+                    type="monotone"
+                    dataKey="sales"
+                    name="sales"
+                    stroke="hsl(var(--chart-2, 160 60% 45%))"
+                    strokeWidth={2}
+                    fillOpacity={0.5}
+                    fill="url(#colorSales)"
+                    activeDot={{ r: 4, strokeWidth: 0 }}
+                    hide={!isChartExpanded && chartData.length > 30}
+                  />
+                  <ChartLegend content={<ChartLegendContent />} />
                 </ReAreaChart>
               </ChartContainer>
+              {isChartLoading && (
+                <div className="absolute inset-0 flex items-center justify-center bg-background/40 backdrop-blur-[2px] z-10 animate-in fade-in duration-300">
+                  <div className="flex flex-col items-center gap-2">
+                    <RefreshCw className="h-6 w-6 text-primary animate-spin" />
+                    <span className="text-xs font-medium text-muted-foreground">Actualizando datos...</span>
+                  </div>
+                </div>
+              )}
+
+              {chartData.length === 0 && !isChartLoading && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-background/50 backdrop-blur-[1px] pointer-events-none">
+                  <TrendingUp className="h-10 w-10 text-muted-foreground/30 mb-2" />
+                  <p className="text-sm font-medium text-muted-foreground/60">No hay datos suficientes para mostrar el gráfico</p>
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -651,6 +772,6 @@ export default function Home() {
           </Card>
         </div>
       </div>
-    </DashboardLayout>
+    </DashboardLayout >
   );
 }

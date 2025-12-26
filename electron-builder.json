@@ -6,9 +6,8 @@
   },
   "files": [
     "out/**/*",
-    "dist/electron/**/*",
-    "dist/preload.js",
-    "node_modules/**/*",
+    "dist/electron/**/*.js",
+    "dist/electron/**/*.js.map",
     "package.json"
   ],
   "extraResources": [

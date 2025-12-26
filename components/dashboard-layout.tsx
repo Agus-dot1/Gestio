@@ -1,6 +1,7 @@
 'use client';
 
 import { ReactNode, useEffect, useState } from 'react';
+import { usePersistedState } from '@/hooks/use-persisted-state';
 
 interface DashboardLayoutProps {
   children: ReactNode;
@@ -9,26 +10,11 @@ interface DashboardLayoutProps {
 export function DashboardLayout({ children }: DashboardLayoutProps) {
 
 
-  const [reduceAnimations, setReduceAnimations] = useState<boolean>(false)
+  const [reduceAnimations] = usePersistedState<boolean>('reduceAnimations', false)
   const [isHydrated, setIsHydrated] = useState(false)
 
   useEffect(() => {
-
-
     setIsHydrated(true)
-    const storedValue = localStorage.getItem('reduceAnimations') === 'true'
-    setReduceAnimations(storedValue)
-  }, [])
-
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail
-      if (detail && typeof detail.reduceAnimations === 'boolean') {
-        setReduceAnimations(detail.reduceAnimations)
-      }
-    }
-    window.addEventListener('app:settings-changed', handler as EventListener)
-    return () => window.removeEventListener('app:settings-changed', handler as EventListener)
   }, [])
 
   return (

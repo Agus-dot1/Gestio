@@ -12,6 +12,7 @@ import { Separator } from '@/components/ui/separator';
 import { useRoutePrefetch } from '@/hooks/use-route-prefetch';
 import { notificationsAdapter } from '@/notifications/renderer/adapter';
 import type { NotificationItem } from '@/notifications/types';
+import { usePersistedState } from '@/hooks/use-persisted-state';
 
 import {
   Home,
@@ -44,7 +45,7 @@ interface SidebarProps {
 export function Sidebar({ className, initialCollapsed = false }: SidebarProps) {
 
 
-  const [collapsed, setCollapsed] = useState<boolean>(initialCollapsed);
+  const [collapsed, setCollapsed] = usePersistedState<boolean>('sidebar:collapsed', initialCollapsed);
   const [searchOpen, setSearchOpen] = useState(false);
   const { resolvedTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
@@ -84,28 +85,8 @@ export function Sidebar({ className, initialCollapsed = false }: SidebarProps) {
 
   useEffect(() => {
     try {
-      const stored = window.localStorage.getItem('sidebar:collapsed');
-      if (stored !== null) {
-        setCollapsed(stored === 'true');
-      }
-    } catch {
-
-
-    }
-  }, []);
-
-
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem('sidebar:collapsed', String(collapsed));
-
-
       document.cookie = `sidebar-collapsed=${collapsed}; path=/; max-age=${60 * 60 * 24 * 365}`;
-    } catch {
-
-
-    }
+    } catch { }
   }, [collapsed]);
 
 
@@ -183,7 +164,7 @@ export function Sidebar({ className, initialCollapsed = false }: SidebarProps) {
           {!collapsed && (
             <div className="flex items-center gap-2.5">
               <div className="w-fit h-fit overflow-hidden rounded-lg border border-primary/20 flex items-center justify-center">
-                <Image src={mounted && resolvedTheme === 'dark' ? "/logo-light.svg" : "/logo-dark.svg"} alt="Logo" width={26} height={26} />
+                <Image src={mounted && resolvedTheme === 'dark' ? "./logo-light.svg" : "./logo-dark.svg"} alt="Logo" width={26} height={26} />
               </div>
               <span className="font-bold text-xl tracking-tight bg-gradient-to-br from-foreground to-foreground/60 bg-clip-text text-transparent">GESTIO</span>
             </div>

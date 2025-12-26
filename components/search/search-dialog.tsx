@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Customer, Sale, Product } from '@/lib/database-operations';
+import { formatCurrency } from '@/config/locale';
 
 type ProductBuyer = { sale_id: number; sale_number: string; date: string; customer_id: number; customer_name: string };
 
@@ -162,13 +163,6 @@ export function SearchDialog({ open, onOpenChange }: SearchDialogProps) {
       setSelectedIndex(0);
     }
   }, [open]);
-
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD'
-    }).format(amount);
-  };
 
 
   useEffect(() => {
@@ -470,7 +464,7 @@ export function SearchDialog({ open, onOpenChange }: SearchDialogProps) {
                 setSelectedIndex(0);
               }}
               onKeyDown={handleKeyDown}
-              className="pl-12 h-14 text-lg rounded-xl bg-muted/30 border-none shadow-inner focus:ring-2 focus:ring-primary/20 placeholder:text-muted-foreground/50 font-medium"
+              className="pl-12 h-14 text-lg rounded-xl bg-muted/30 border-none shadow-inner focus:ring-2 focus:ring-muted  placeholder:text-muted-foreground/50 font-medium"
               autoComplete="off"
               autoFocus
             />

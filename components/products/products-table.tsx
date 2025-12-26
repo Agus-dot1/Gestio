@@ -12,9 +12,14 @@ import { Search, MoreHorizontal, Edit, Trash2, Eye, EyeOff, Package, Download, F
 import type { Product } from '@/lib/database-operations';
 import { cn } from '@/lib/utils';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ButtonGroup } from '../ui/button-group';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { ProductsColumnToggle, ColumnVisibility as ProductColumnVisibility } from './products-column-toggle';
-import { Toggle } from '../ui/toggle';
+import { Switch } from '../ui/switch';
+import { Label } from '../ui/label';
+import { useSearchParams, useRouter, usePathname } from 'next/navigation';
+import { usePersistedState } from '@/hooks/use-persisted-state';
+import { DataTablePagination } from '../ui/data-table-pagination';
+import { formatCurrency } from '@/config/locale';
 
 interface ProductsTableProps {
   products: Product[];
@@ -32,13 +37,13 @@ interface ProductsTableProps {
   serverSidePagination?: boolean;
 }
 
-export function ProductsTable({ 
-  products, 
-  highlightId, 
-  onEdit, 
-  onDelete, 
+export function ProductsTable({
+  products,
+  highlightId,
+  onEdit,
+  onDelete,
   onBulkDelete,
-  onToggleStatus, 
+  onToggleStatus,
   isLoading = false,
   searchTerm: externalSearchTerm,
   onSearchChange,
@@ -47,36 +52,113 @@ export function ProductsTable({
   paginationInfo,
   serverSidePagination = false
 }: ProductsTableProps) {
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
+  const router = useRouter();
 
+  // 1. Initial Highlight States from localStorage
+  const [stickyHighlight, setStickyHighlight] = usePersistedState<string | null>('stickyHighlight-products', null);
+
+  // 2. Auto-scroll preference state
+  const [autoScrollEnabled, setAutoScrollEnabled] = usePersistedState<boolean>('gestio-auto-scroll', true);
+
+  // 3. Initial State from URL
+  const highlightIdFromUrl = searchParams.get('highlight');
+
+  // 4. Source of Truth
+  const activeHighlight = highlightIdFromUrl || stickyHighlight;
+
+  // 5. Automatic Persistence & URL Cleaning
+  useEffect(() => {
+    if (highlightIdFromUrl) {
+      setStickyHighlight(highlightIdFromUrl);
+      // Clean the URL without reloading
+      const params = new URLSearchParams(searchParams);
+      params.delete('highlight');
+      router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+    }
+  }, [highlightIdFromUrl, pathname, router, searchParams]);
+
+  const handleClearHighlight = () => {
+    setStickyHighlight(null);
+    if (highlightIdFromUrl) {
+      const params = new URLSearchParams(searchParams);
+      params.delete('highlight');
+      router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+    }
+  };
+
+  // 6. Scroll to highlighted item
+  useEffect(() => {
+    if (activeHighlight && autoScrollEnabled) {
+      const timer = setTimeout(() => {
+        const element = document.getElementById(`product-${activeHighlight}`);
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [activeHighlight, autoScrollEnabled]);
 
   const [localProducts, setLocalProducts] = useState<Product[]>(products);
   useEffect(() => {
     setLocalProducts(products);
   }, [products]);
-  const [internalSearchTerm, setInternalSearchTerm] = useState('');
+
+  const PRODUCTS_PERSIST_KEY = 'productsTablePrefs';
+
+  const [prefs, setPrefs] = usePersistedState<{
+    columnVisibility: ProductColumnVisibility;
+    sortConfig: { key: string | null; direction: 'asc' | 'desc' };
+    searchTerm?: string;
+  }>(PRODUCTS_PERSIST_KEY, {
+    columnVisibility: {
+      name: true,
+      category: true,
+      price: true,
+      cost: true,
+      stock: true,
+      description: true,
+      status: true,
+    },
+    sortConfig: { key: null, direction: 'asc' },
+    searchTerm: '',
+  });
+
+  const columnVisibility = prefs.columnVisibility;
+  const setColumnVisibility = (value: ProductColumnVisibility | ((curr: ProductColumnVisibility) => ProductColumnVisibility)) => {
+    setPrefs(prev => ({
+      ...prev,
+      columnVisibility: typeof value === 'function' ? value(prev.columnVisibility) : value
+    }));
+  };
+
+  const sortConfig = prefs.sortConfig;
+  const setSortConfig = (value: { key: string | null; direction: 'asc' | 'desc' } | ((curr: { key: string | null; direction: 'asc' | 'desc' }) => { key: string | null; direction: 'asc' | 'desc' })) => {
+    setPrefs(prev => ({
+      ...prev,
+      sortConfig: typeof value === 'function' ? value(prev.sortConfig) : value
+    }));
+  };
+
+  const internalSearchTerm = prefs.searchTerm || '';
+  const setInternalSearchTerm = (value: string | ((curr: string) => string)) => {
+    setPrefs(prev => ({
+      ...prev,
+      searchTerm: typeof value === 'function' ? value(prev.searchTerm || '') : value
+    }));
+  };
+
   const [inputValue, setInputValue] = useState(externalSearchTerm || '');
   const debounceRef = useRef<number | null>(null);
-  const [internalCurrentPage, setInternalCurrentPage] = useState(1);
   const [deleteProduct, setDeleteProduct] = useState<Product | null>(null);
   const [showBulkDeleteDialog, setShowBulkDeleteDialog] = useState(false);
   const [selectedProducts, setSelectedProducts] = useState<Set<number>>(new Set());
   const [selectAll, setSelectAll] = useState(false);
-  const [columnVisibility, setColumnVisibility] = useState<ProductColumnVisibility>({
-    name: true,
-    category: true,
-    price: true,
-    cost: true,
-    stock: true,
-    description: true,
-    status: true,
-  });
+  const [editing, setEditing] = useState<Record<number, { price?: string; cost_price?: string; stock?: string; saving?: boolean }>>({});
 
-  const [sortConfig, setSortConfig] = useState<{ key: 'name' | 'category' | 'price' | 'cost_price' | 'stock' | 'is_active' | null; direction: 'asc' | 'desc' }>({
-    key: null,
-    direction: 'asc'
-  });
-
-  const handleSort = (key: 'name' | 'category' | 'price' | 'cost_price' | 'stock' | 'is_active') => {
+  const handleSort = (key: string) => {
     setSortConfig(prev => {
       if (prev.key === key) {
         return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
@@ -85,16 +167,16 @@ export function ProductsTable({
     });
   };
 
-  const getSortIcon = (key: 'name' | 'category' | 'price' | 'cost_price' | 'stock' | 'is_active') => {
+  const getSortIcon = (key: string) => {
     if (sortConfig.key !== key) return <ArrowUpDown className="ml-1 h-4 w-4" />;
     return sortConfig.direction === 'asc' ? <ArrowUp className="ml-1 h-4 w-4" /> : <ArrowDown className="ml-1 h-4 w-4" />;
   };
+
   useEffect(() => {
     if (serverSidePagination) {
       setInputValue(externalSearchTerm || '');
     }
   }, [externalSearchTerm, serverSidePagination]);
-
 
   const searchTerm = serverSidePagination ? (externalSearchTerm || '') : internalSearchTerm;
 
@@ -110,23 +192,12 @@ export function ProductsTable({
       }, 300);
     } else {
       setInternalSearchTerm(term);
-      setInternalCurrentPage(1);
     }
   };
 
-  const filteredProducts = serverSidePagination ? localProducts : localProducts.filter(product => {
-    const matchesSearch = product.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      product.description?.toLowerCase().includes(searchTerm.toLowerCase());
-    return matchesSearch;
-  });
+  const filteredProducts = localProducts;
 
   const sortedProducts = (() => {
-
-
-
-
-
-
     const base = filteredProducts;
     if (!sortConfig.key) return base;
     const sorted = [...base].sort((a, b) => {
@@ -144,8 +215,6 @@ export function ProductsTable({
         const cmp = (aBool === bBool) ? 0 : (aBool ? 1 : -1);
         return sortConfig.direction === 'asc' ? cmp : -cmp;
       } else {
-
-
         aVal = Number(aVal ?? 0);
         bVal = Number(bVal ?? 0);
         const cmp = aVal - bVal;
@@ -154,10 +223,6 @@ export function ProductsTable({
     });
     return sorted;
   })();
-
-
-
-  const [editing, setEditing] = useState<Record<number, { price?: string; cost_price?: string; stock?: string; saving?: boolean }>>({});
 
   const setEditingField = (id: number, field: 'price' | 'cost_price' | 'stock', value: string | undefined) => {
     setEditing(prev => ({
@@ -170,11 +235,7 @@ export function ProductsTable({
   };
 
   const saveEditingField = async (id: number, field: 'price' | 'cost_price' | 'stock', value: string | undefined) => {
-
-
     if (value === undefined || value === '') {
-
-
       setEditing(prev => ({ ...prev, [id]: { ...prev[id], [field]: undefined } }));
       return;
     }
@@ -185,8 +246,6 @@ export function ProductsTable({
     setEditing(prev => ({ ...prev, [id]: { ...prev[id], saving: true } }));
     try {
       await window.electronAPI?.database?.products?.update(id, { [field]: num } as any);
-
-
       setLocalProducts(prev => prev.map(p => p.id === id ? { ...p, [field]: num } as Product : p));
     } catch (e) {
       console.error('Failed to update product', id, field, e);
@@ -195,67 +254,10 @@ export function ProductsTable({
     }
   };
 
-
-
-  const PRODUCTS_PERSIST_KEY = 'productsTablePrefs';
-
-
-
-  useEffect(() => {
-    try {
-      const raw = typeof window !== 'undefined' ? localStorage.getItem(PRODUCTS_PERSIST_KEY) : null;
-      if (raw) {
-        const prefs = JSON.parse(raw);
-        if (prefs?.columnVisibility) {
-          setColumnVisibility(prev => ({ ...prev, ...prefs.columnVisibility }));
-        }
-        if (prefs?.sortConfig) {
-          setSortConfig(prev => ({ ...prev, ...prefs.sortConfig }));
-        }
-        if (!serverSidePagination && typeof prefs?.searchTerm === 'string') {
-          setInternalSearchTerm(prefs.searchTerm);
-        }
-      }
-    } catch (e) {
-      console.warn('Failed to load products table prefs:', e);
-    }
-  }, [serverSidePagination]);
-
-
-
-  useEffect(() => {
-    try {
-      const prefs = {
-        columnVisibility,
-        sortConfig,
-        searchTerm: serverSidePagination ? undefined : internalSearchTerm,
-      };
-      if (typeof window !== 'undefined') {
-        localStorage.setItem(PRODUCTS_PERSIST_KEY, JSON.stringify(prefs));
-      }
-    } catch (e) {
-      console.warn('Failed to save products table prefs:', e);
-    }
-  }, [columnVisibility, sortConfig, internalSearchTerm, serverSidePagination]);
-
-
-
-  const PAGE_SIZE = 10;
-  const currentPage = serverSidePagination ? (externalCurrentPage || 1) : internalCurrentPage;
-  const clientTotal = sortedProducts.length;
-  const totalPages = serverSidePagination
-    ? (paginationInfo?.totalPages || 1)
-    : Math.max(1, Math.ceil(clientTotal / PAGE_SIZE));
-  const visibleProducts = serverSidePagination
-    ? sortedProducts // parent provides current page data server-side
-    : sortedProducts.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  const visibleProducts = sortedProducts;
 
   const changePage = (page: number) => {
-    if (serverSidePagination) {
-      onPageChange && onPageChange(page);
-    } else {
-      setInternalCurrentPage(page);
-    }
+    onPageChange && onPageChange(page);
   };
 
   const handleDelete = async () => {
@@ -312,24 +314,9 @@ export function ProductsTable({
       newSelected.delete(productId);
     }
     setSelectedProducts(newSelected);
-    
 
-
-    if (serverSidePagination) {
-      const total = paginationInfo?.total || 0;
-      setSelectAll(total > 0 && newSelected.size === total);
-    } else {
-      setSelectAll(filteredProducts.length > 0 && newSelected.size === filteredProducts.length);
-    }
-  };
-
-  const formatCurrency = (value: number | undefined) => {
-    if (value === undefined || value === null) return '-';
-    try {
-      return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(Number(value));
-    } catch {
-      return `$${Number(value).toFixed(2)}`;
-    }
+    const total = paginationInfo?.total || 0;
+    setSelectAll(total > 0 && newSelected.size === total);
   };
 
   const formatDate = (date?: string) => {
@@ -359,8 +346,6 @@ export function ProductsTable({
     const autoTable = (await import('jspdf-autotable')).default;
     const doc = new jsPDF();
 
-
-
     doc.setFontSize(18);
     doc.text('Listado de Productos', 14, 18);
     doc.setFontSize(11);
@@ -371,7 +356,7 @@ export function ProductsTable({
       p.id ?? '-',
       p.name,
       formatCurrency(p.price),
-      formatCurrency(p.cost_price ?? undefined),
+      formatCurrency(p.cost_price),
       p.stock ?? 0,
       p.description || '-'
     ]);
@@ -385,7 +370,7 @@ export function ProductsTable({
       styles: { fontSize: 8, cellPadding: 2 },
       headStyles: { fillColor: [30, 30, 30], textColor: 255, fontStyle: 'bold' },
       columnStyles: {
-        9: { cellWidth: 60 } // Descripción más ancha
+        5: { cellWidth: 60 } // Descripción
       },
       didDrawPage: (data: any) => {
         const pageCount = (doc as any).internal?.getNumberOfPages
@@ -393,12 +378,8 @@ export function ProductsTable({
           : 1;
         const pageNum = (data as any)?.pageNumber ?? pageCount;
         const str = `Página ${pageNum} de ${pageCount}`;
-        const width = (doc as any).internal?.pageSize?.getWidth
-          ? (doc as any).internal.pageSize.getWidth()
-          : (doc as any).internal?.pageSize?.width;
-        const height = (doc as any).internal?.pageSize?.getHeight
-          ? (doc as any).internal.pageSize.getHeight()
-          : (doc as any).internal?.pageSize?.height;
+        const width = (doc as any).internal?.pageSize?.getWidth();
+        const height = (doc as any).internal?.pageSize?.getHeight();
         doc.setFontSize(9);
         doc.text(str, (width || 210) - 60, (height || 297) - 10);
       }
@@ -421,45 +402,75 @@ export function ProductsTable({
       selectedProductsData = products.filter(p => selectedProducts.has(p.id!));
     }
 
-    const XLSX = await import('xlsx');
-    const rows = selectedProductsData.map(p => ({
-      ID: p.id ?? '',
-      Nombre: p.name,
-      Precio: typeof p.price === 'number' ? Number(p.price) : '',
-      Costo: p.cost_price != null ? Number(p.cost_price) : '',
-      Stock: p.stock ?? 0,
-      Descripción: p.description || ''
-    }));
-    const ws = XLSX.utils.json_to_sheet(rows);
+    const ExcelJS = await import('exceljs');
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Productos');
 
-
-    ws['!cols'] = [
-      { wch: 6 },  // ID
-      { wch: 30 }, // Nombre
-      { wch: 12 }, // Precio
-      { wch: 12 }, // Costo
-      { wch: 8 },  // Stock
-      { wch: 40 }, // Descripción
+    // Define columns
+    worksheet.columns = [
+      { header: 'ID', key: 'id', width: 6 },
+      { header: 'Nombre', key: 'nombre', width: 30 },
+      { header: 'Precio', key: 'precio', width: 12 },
+      { header: 'Costo', key: 'costo', width: 12 },
+      { header: 'Stock', key: 'stock', width: 8 },
+      { header: 'Descripción', key: 'descripcion', width: 40 },
     ];
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Productos');
-    XLSX.writeFile(wb, `productos_${new Date().toISOString().split('T')[0]}.xlsx`);
+
+    // Add rows
+    selectedProductsData.forEach(p => {
+      worksheet.addRow({
+        id: p.id ?? '',
+        nombre: p.name,
+        precio: typeof p.price === 'number' ? p.price : '',
+        costo: p.cost_price != null ? p.cost_price : '',
+        stock: p.stock ?? 0,
+        descripcion: p.description || ''
+      });
+    });
+
+    // Save file
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `productos_${new Date().toISOString().split('T')[0]}.xlsx`;
+    link.click();
+    URL.revokeObjectURL(url);
   };
 
-
-
-
-
-  const isAllSelected = serverSidePagination
-    ? ((paginationInfo?.total || 0) > 0 && selectedProducts.size === (paginationInfo?.total || 0))
-    : (filteredProducts.length > 0 && selectedProducts.size === filteredProducts.length);
+  const isAllSelected = (paginationInfo?.total || 0) > 0 && selectedProducts.size === (paginationInfo?.total || 0);
 
   return (
     <>
       <Card>
         <CardHeader>
-          <div className="flex items-center">
-            <div className="flex items-center gap-2">
+          <div className="flex flex-col gap-4">
+            {activeHighlight && (
+              <div className="p-2 bg-primary/10 border border-primary/20 rounded-lg flex items-center justify-between animate-in fade-in slide-in-from-top-2">
+                <div className="flex items-center gap-2 text-sm text-primary font-medium">
+                  <Search className="h-4 w-4" />
+                  <span>Producto resaltado (ID: {activeHighlight})</span>
+                </div>
+                <div className="flex gap-4 items-center">
+                  <div className="flex items-center gap-2 px-3 border-r border-primary/20">
+                    <Switch
+                      id="auto-scroll-products"
+                      checked={autoScrollEnabled}
+                      onCheckedChange={setAutoScrollEnabled}
+                    />
+                    <Label htmlFor="auto-scroll-products" className="text-[10px] uppercase font-bold tracking-wider opacity-70 cursor-pointer whitespace-nowrap">
+                      Auto-scroll
+                    </Label>
+                  </div>
+                  <Button size="sm" variant="ghost" onClick={handleClearHighlight} className="h-8">
+                    Quitar resalte
+                  </Button>
+                </div>
+              </div>
+            )}
+            <div className="flex items-center">
+              <div className="flex items-center gap-2">
                 <div className="flex items-center gap-2">
                   <div className="relative">
                     <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -476,44 +487,45 @@ export function ProductsTable({
                     onColumnVisibilityChange={setColumnVisibility}
                   />
                   {selectedProducts.size > 0 && (
-                  <div className="flex items-center gap-2 mr-4">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={exportProductsPDF}
-                      className="h-8"
-                    >
-                      <FileText className="h-4 w-4 mr-1" />
-                      PDF
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={exportProductsExcel}
-                      className="h-8"
-                    >
-                      <Download className="h-4 w-4 mr-1" />
-                      Excel
-                    </Button>
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      onClick={() => setShowBulkDeleteDialog(true)}
-                      className="h-8"
-                    >
-                      <Trash2 className="h-4 w-4 mr-1" />
-                      Eliminar
-                    </Button>
-                                        <Badge variant="secondary" className="bg-primary/10 text-primary">
-                      {selectedProducts.size} seleccionado{selectedProducts.size !== 1 ? 's' : ''}
-                    </Badge>
-                  </div>
-                )}
-                 </div>
+                    <div className="flex items-center gap-2 mr-4">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={exportProductsPDF}
+                        className="h-8"
+                      >
+                        <FileText className="h-4 w-4 mr-1" />
+                        PDF
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={exportProductsExcel}
+                        className="h-8"
+                      >
+                        <Download className="h-4 w-4 mr-1" />
+                        Excel
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => setShowBulkDeleteDialog(true)}
+                        className="h-8"
+                      >
+                        <Trash2 className="h-4 w-4 mr-1" />
+                        Eliminar
+                      </Button>
+                      <Badge variant="secondary" className="bg-primary/10 text-primary">
+                        {selectedProducts.size} seleccionado{selectedProducts.size !== 1 ? 's' : ''}
+                      </Badge>
+                    </div>
+                  )}
+                </div>
               </div>
+            </div>
           </div>
         </CardHeader>
-          <CardContent>
+        <CardContent>
           {isLoading ? (
             <div className="rounded-xl border">
               <Table className="short:[&>thead>tr>th]:py-2 short:[&>tbody>tr>td]:py-1 short:[&_*]:text-sm">
@@ -556,10 +568,7 @@ export function ProductsTable({
                         <Skeleton className="h-4 w-40" />
                       </TableCell>
                       <TableCell>
-                        <Skeleton className="h-6 w-16 rounded-full" />
-                      </TableCell>
-                      <TableCell>
-                        <Skeleton className="h-8 w-8 rounded" />
+                        <Skeleton className="h-8 w-8 rounded font-medium" />
                       </TableCell>
                     </TableRow>
                   ))}
@@ -589,9 +598,9 @@ export function ProductsTable({
                     </TableHead>
                     {columnVisibility.name && (
                       <TableHead>
-                        <Button 
-                          variant="ghost" 
-                          className="h-auto p-0 font-semibold hover:bg-transparent" 
+                        <Button
+                          variant="ghost"
+                          className="h-auto p-0 font-semibold hover:bg-transparent"
                           onClick={() => handleSort('name')}
                         >
                           Nombre {getSortIcon('name')}
@@ -601,9 +610,9 @@ export function ProductsTable({
                     {columnVisibility.category && (<TableHead>Categoría</TableHead>)}
                     {columnVisibility.price && (
                       <TableHead>
-                        <Button 
-                          variant="ghost" 
-                          className="h-auto p-0 font-semibold hover:bg-transparent" 
+                        <Button
+                          variant="ghost"
+                          className="h-auto p-0 font-semibold hover:bg-transparent"
                           onClick={() => handleSort('price')}
                         >
                           Precio {getSortIcon('price')}
@@ -612,9 +621,9 @@ export function ProductsTable({
                     )}
                     {columnVisibility.cost && (
                       <TableHead>
-                        <Button 
-                          variant="ghost" 
-                          className="h-auto p-0 font-semibold hover:bg-transparent" 
+                        <Button
+                          variant="ghost"
+                          className="h-auto p-0 font-semibold hover:bg-transparent"
                           onClick={() => handleSort('cost_price')}
                         >
                           Costo {getSortIcon('cost_price')}
@@ -623,9 +632,9 @@ export function ProductsTable({
                     )}
                     {columnVisibility.stock && (
                       <TableHead>
-                        <Button 
-                          variant="ghost" 
-                          className="h-auto p-0 font-semibold hover:bg-transparent" 
+                        <Button
+                          variant="ghost"
+                          className="h-auto p-0 font-semibold hover:bg-transparent"
                           onClick={() => handleSort('stock')}
                         >
                           Stock {getSortIcon('stock')}
@@ -635,9 +644,9 @@ export function ProductsTable({
                     {columnVisibility.description && <TableHead>Descripción</TableHead>}
                     {columnVisibility.status && (
                       <TableHead>
-                        <Button 
-                          variant="ghost" 
-                          className="h-auto p-0 font-semibold hover:bg-transparent" 
+                        <Button
+                          variant="ghost"
+                          className="h-auto p-0 font-semibold hover:bg-transparent"
                           onClick={() => handleSort('is_active')}
                         >
                           Estado {getSortIcon('is_active')}
@@ -648,14 +657,13 @@ export function ProductsTable({
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {visibleProducts.map((product, index) => (
-                    <TableRow 
-                      key={product.id} 
+                  {visibleProducts.map((product) => (
+                    <TableRow
+                      key={product.id}
                       id={`product-${product.id}`}
                       className={cn(
-                        "transition-all duration-200 hover:bg-muted/50 ",
-                        highlightId === product.id?.toString() && 'bg-muted/50 ring-2 ring-primary/20',
-                        `animation-delay-${Math.min(index * 100, 500)}ms`
+                        "transition-colors relative",
+                        activeHighlight === product.id?.toString() && "bg-primary/5 hover:bg-primary/10 after:absolute after:left-0 after:top-0 after:bottom-0 after:w-1 after:bg-primary"
                       )}
                     >
                       <TableCell>
@@ -667,22 +675,20 @@ export function ProductsTable({
                       </TableCell>
                       {columnVisibility.name && (
                         <TableCell className="font-medium">
-                          <div className="flex items-center gap-2">
-                            <div className="flex flex-col">
-                              <span className="font-semibold text-foreground">{product.name}</span>
-                              {highlightId === product.id?.toString() && (
-                                <Badge variant="outline" className="bg-primary/10 text-primary w-fit mt-1">
-                                  Coincidencia
-                                </Badge>
-                              )}
-                            </div>
+                          <div className="flex flex-col">
+                            <span className="font-semibold text-foreground text-sm">{product.name}</span>
+                            {highlightId === product.id?.toString() && (
+                              <Badge className="bg-primary/10 text-primary border-primary/20 w-fit mt-1">
+                                Coincidencia
+                              </Badge>
+                            )}
                           </div>
                         </TableCell>
                       )}
                       {columnVisibility.category && (
                         <TableCell>
                           {product.category && product.category !== 'sin-categoria' ? (
-                            <Badge variant="outline" className="text-blue-400 border-blue-800">
+                            <Badge className="bg-blue-500/10 text-blue-600 hover:bg-blue-500/20 border-blue-500/20">
                               {product.category}
                             </Badge>
                           ) : (
@@ -692,54 +698,32 @@ export function ProductsTable({
                       )}
                       {columnVisibility.price && (
                         <TableCell>
-                          <div className="flex items-center">
-                            <Input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              value={editing[product.id!]?.price ?? (product.price?.toString() ?? '')}
-                              onChange={(e) => {
-                                const v = e.target.value;
-                                setEditingField(product.id!, 'price', v);
-                              }}
-                              onBlur={() => saveEditingField(product.id!, 'price', editing[product.id!]?.price)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') {
-                                  e.currentTarget.blur();
-                                } else if (e.key === 'Escape') {
-                                  setEditingField(product.id!, 'price', product.price?.toString());
-                                }
-                              }}
-                              disabled={editing[product.id!]?.saving}
-                              className="w-28 h-8"
-                            />
-                          </div>
+                          <Input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={editing[product.id!]?.price ?? (product.price?.toString() ?? '')}
+                            onChange={(e) => setEditingField(product.id!, 'price', e.target.value)}
+                            onBlur={() => saveEditingField(product.id!, 'price', editing[product.id!]?.price)}
+                            onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+                            disabled={editing[product.id!]?.saving}
+                            className="w-28 h-8"
+                          />
                         </TableCell>
                       )}
                       {columnVisibility.cost && (
                         <TableCell>
-                          <div className="flex items-center">
-                            <Input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              value={editing[product.id!]?.cost_price ?? (typeof product.cost_price === 'number' ? product.cost_price.toString() : '')}
-                              onChange={(e) => {
-                                const v = e.target.value;
-                                setEditingField(product.id!, 'cost_price', v);
-                              }}
-                              onBlur={() => saveEditingField(product.id!, 'cost_price', editing[product.id!]?.cost_price)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') {
-                                  e.currentTarget.blur();
-                                } else if (e.key === 'Escape') {
-                                  setEditingField(product.id!, 'cost_price', typeof product.cost_price === 'number' ? product.cost_price.toString() : '');
-                                }
-                              }}
-                              disabled={editing[product.id!]?.saving}
-                              className="w-28 h-8"
-                            />
-                          </div>
+                          <Input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={editing[product.id!]?.cost_price ?? (product.cost_price?.toString() ?? '')}
+                            onChange={(e) => setEditingField(product.id!, 'cost_price', e.target.value)}
+                            onBlur={() => saveEditingField(product.id!, 'cost_price', editing[product.id!]?.cost_price)}
+                            onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+                            disabled={editing[product.id!]?.saving}
+                            className="w-28 h-8"
+                          />
                         </TableCell>
                       )}
                       {columnVisibility.stock && (
@@ -749,215 +733,132 @@ export function ProductsTable({
                               type="number"
                               step="1"
                               min="0"
-                              value={editing[product.id!]?.stock ?? (typeof product.stock === 'number' ? product.stock.toString() : '')}
-                              onChange={(e) => {
-                                const v = e.target.value;
-                                setEditingField(product.id!, 'stock', v);
-                              }}
+                              value={editing[product.id!]?.stock ?? (product.stock?.toString() ?? '')}
+                              onChange={(e) => setEditingField(product.id!, 'stock', e.target.value)}
                               onBlur={() => saveEditingField(product.id!, 'stock', editing[product.id!]?.stock)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') {
-                                  e.currentTarget.blur();
-                                } else if (e.key === 'Escape') {
-                                  setEditingField(product.id!, 'stock', typeof product.stock === 'number' ? product.stock.toString() : '');
-                                }
-                              }}
+                              onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
                               disabled={editing[product.id!]?.saving}
                               className="w-20 h-8"
                             />
-                            <span className="text-muted-foreground text-sm">unidades</span>
+                            <span className="text-muted-foreground text-xs">un</span>
                           </div>
                         </TableCell>
                       )}
                       {columnVisibility.description && (
-                        <TableCell className="max-w-[300px]">
-                          <div className="truncate text-sm">
-                            {product.description || (
-                              <span className="text-muted-foreground italic">Sin descripción</span>
-                            )}
+                        <TableCell className="max-w-[200px]">
+                          <div className="truncate text-xs text-muted-foreground">
+                            {product.description || 'Sin descripción'}
                           </div>
                         </TableCell>
                       )}
                       {columnVisibility.status && (
                         <TableCell>
                           {product.is_active ? (
-                            <Badge variant="outline" className="text-green-400 border-green-800">Activo</Badge>
+                            <Badge className="bg-green-500/10 text-green-600 hover:bg-green-500/20 border-green-500/20 text-[10px] h-5">Activo</Badge>
                           ) : (
-                            <Badge variant="outline" className="text-gray-700 border-gray-200">Inactivo</Badge>
+                            <Badge className="bg-muted-foreground/10 text-muted-foreground hover:bg-muted-foreground/20 border-muted-foreground/20 text-[10px] h-5">Inactivo</Badge>
                           )}
                         </TableCell>
                       )}
-                      <TableCell className="p-2">
-                          <ButtonGroup className="p-1">
-                            <Toggle
-                              variant="outline"
-                              size="sm"
-                              pressed={product.is_active}
-                              onPressedChange={(pressed) => onToggleStatus(product.id!, pressed)}
-                              aria-label={product.is_active ? 'Desactivar producto' : 'Activar producto'}
-                              className="w-[120px]"
-                            >
-                              <span className="flex items-center gap-1">
-                                {product.is_active ? (
-                                  <>
-                                    <EyeOff className="h-4 w-4" />
-                                    <span>Desactivar</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Eye className="h-4 w-4" />
-                                    <span>Activar</span>
-                                  </>
-                                )}
-                              </span>
-                            </Toggle>
-                            <Button variant="secondary" size="sm" onClick={() => onEdit(product)}>Editar</Button>
-                            <Button variant="destructive" size="sm" onClick={() => setDeleteProduct(product)}>Eliminar</Button>
-                          </ButtonGroup>
-                        </TableCell>
+                      <TableCell className="text-right">
+                        <TooltipProvider>
+                          <div className="flex items-center justify-end gap-1">
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className={cn("h-9 w-9", product.is_active ? "text-muted-foreground hover:text-primary" : "text-primary")}
+                                  onClick={() => onToggleStatus(product.id!, !product.is_active)}
+                                >
+                                  {product.is_active ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>{product.is_active ? 'Desactivar producto' : 'Activar producto'}</TooltipContent>
+                            </Tooltip>
+
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-9 w-9 text-muted-foreground hover:text-primary"
+                                  onClick={() => onEdit(product)}
+                                >
+                                  <Edit className="h-5 w-5" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Editar producto</TooltipContent>
+                            </Tooltip>
+
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-9 w-9 text-red-500 hover:text-red-600"
+                                  onClick={() => setDeleteProduct(product)}
+                                >
+                                  <Trash2 className="h-5 w-5" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Eliminar producto</TooltipContent>
+                            </Tooltip>
+                          </div>
+                        </TooltipProvider>
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
             </div>
           )}
-          
-          {/* Pagination Controls */}
-          {serverSidePagination && paginationInfo && paginationInfo.totalPages > 1 && (
-            <div className="flex items-center justify-between px-2 py-4">
-              <div className="text-sm text-muted-foreground">
-                Mostrando {((paginationInfo.currentPage - 1) * paginationInfo.pageSize) + 1} a {Math.min(paginationInfo.currentPage * paginationInfo.pageSize, paginationInfo.total)} de {paginationInfo.total} productos
-              </div>
-              <div className="flex items-center space-x-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => onPageChange && onPageChange(paginationInfo.currentPage - 1)}
-                  disabled={paginationInfo.currentPage === 1}
-                >
-                  Anterior
-                </Button>
-                <div className="flex items-center space-x-1">
-                  {Array.from({ length: paginationInfo.totalPages }, (_, i) => i + 1).map((page) => {
 
-
-                    const showPage = page === 1 || page === paginationInfo.totalPages || 
-                                   (page >= paginationInfo.currentPage - 1 && page <= paginationInfo.currentPage + 1);
-                    
-                    if (!showPage) {
-
-
-                      if (page === paginationInfo.currentPage - 2 || page === paginationInfo.currentPage + 2) {
-                        return <span key={page} className="px-2 text-muted-foreground">...</span>;
-                      }
-                      return null;
-                    }
-                    
-                    return (
-                      <Button
-                        key={page}
-                        variant={paginationInfo.currentPage === page ? "default" : "outline"}
-                        size="sm"
-                        onClick={() => onPageChange && onPageChange(page)}
-                        className="w-8 h-8 p-0"
-                      >
-                        {page}
-                      </Button>
-                    );
-                  })}
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => onPageChange && onPageChange(paginationInfo.currentPage + 1)}
-                  disabled={paginationInfo.currentPage === paginationInfo.totalPages}
-                >
-                  Siguiente
-                </Button>
-              </div>
-            </div>
-          )}
-          {!serverSidePagination && totalPages > 1 && (
-            <div className="flex items-center justify-between px-2 py-4">
-              <div className="text-sm text-muted-foreground">
-                Mostrando {(currentPage - 1) * PAGE_SIZE + 1} a {Math.min(currentPage * PAGE_SIZE, clientTotal)} de {clientTotal} productos
-              </div>
-              <div className="flex items-center space-x-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => changePage(currentPage - 1)}
-                  disabled={currentPage === 1}
-                >
-                  Anterior
-                </Button>
-                <div className="flex items-center space-x-1">
-                  {Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => {
-                    const showPage = page === 1 || page === totalPages || (page >= currentPage - 1 && page <= currentPage + 1);
-                    if (!showPage) {
-                      if (page === currentPage - 2 || page === currentPage + 2) {
-                        return <span key={page} className="px-2 text-muted-foreground">...</span>;
-                      }
-                      return null;
-                    }
-                    return (
-                      <Button
-                        key={page}
-                        variant={currentPage === page ? "default" : "outline"}
-                        size="sm"
-                        onClick={() => changePage(page)}
-                        className="w-8 h-8 p-0"
-                      >
-                        {page}
-                      </Button>
-                    );
-                  })}
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => changePage(currentPage + 1)}
-                  disabled={currentPage === totalPages}
-                >
-                  Siguiente
-                </Button>
-              </div>
-            </div>
+          {/* Pagination */}
+          {paginationInfo && (
+            <DataTablePagination
+              total={paginationInfo.total}
+              totalPages={paginationInfo.totalPages}
+              currentPage={paginationInfo.currentPage}
+              pageSize={paginationInfo.pageSize}
+              onPageChange={changePage}
+              entityName="productos"
+            />
           )}
         </CardContent>
       </Card>
 
-      {/* Delete Confirmation Dialog */}
+      {/* Delete Single Product */}
       <AlertDialog open={!!deleteProduct} onOpenChange={() => setDeleteProduct(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Eliminar producto</AlertDialogTitle>
+            <AlertDialogTitle>¿Está seguro?</AlertDialogTitle>
             <AlertDialogDescription>
-              ¿Estas seguro de eliminar &quot;{deleteProduct?.name}&quot;? Esta accion no se puede deshacer.
+              Esta acción eliminará el producto "{deleteProduct?.name}" de forma permanente.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancelar</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDelete} className="bg-red-600 hover:bg-red-700 text-slate-50">
+            <AlertDialogAction onClick={handleDelete} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
               Eliminar
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Bulk Delete Confirmation Dialog */}
+      {/* Bulk Delete */}
       <AlertDialog open={showBulkDeleteDialog} onOpenChange={setShowBulkDeleteDialog}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Eliminar productos seleccionados</AlertDialogTitle>
+            <AlertDialogTitle>¿Eliminar seleccionados?</AlertDialogTitle>
             <AlertDialogDescription>
-              ¿Estas seguro de eliminar {selectedProducts.size} producto{selectedProducts.size !== 1 ? 's' : ''}? Esta acción no se puede deshacer.
+              Vas a eliminar {selectedProducts.size} productos. Esta acción no se puede deshacer.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancelar</AlertDialogCancel>
-            <AlertDialogAction onClick={handleBulkDelete} className="bg-red-600 hover:bg-red-700 text-slate-50">
-              Eliminar {selectedProducts.size} producto{selectedProducts.size !== 1 ? 's' : ''}
+            <AlertDialogAction onClick={handleBulkDelete} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+              Eliminar todos
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

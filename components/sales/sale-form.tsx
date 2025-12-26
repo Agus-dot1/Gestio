@@ -43,7 +43,8 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
     payment_method: 'cash' as 'cash' | 'bank_transfer',
     period_type: 'monthly' as 'monthly' | 'weekly' | 'biweekly',
     number_of_installments: 6,
-    notes: ''
+    notes: '',
+    discount_amount: 0
   });
   const [items, setItems] = useState<SaleItem[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -73,7 +74,8 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
         payment_method: (sale as any).payment_method || 'cash',
         period_type: sale.period_type || 'monthly',
         number_of_installments: sale.number_of_installments || 6,
-        notes: sale.notes || ''
+        notes: sale.notes || '',
+        discount_amount: sale.discount_amount || 0
       });
       loadSaleItems(sale.id!);
       setSaleDateInput(formatISOToDDMMYYYY(sale.date));
@@ -84,7 +86,8 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
         payment_method: 'cash',
         period_type: 'monthly',
         number_of_installments: 6,
-        notes: ''
+        notes: '',
+        discount_amount: 0
       });
       setItems([]);
       setSaleDateInput('');
@@ -215,8 +218,9 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
 
   const calculateTotals = () => {
     const subtotal = items.reduce((sum, item) => sum + item.line_total, 0);
-    const total = subtotal; // no sale-level discount
-    return { subtotal, total };
+    const discount = formData.discount_amount || 0;
+    const total = Math.max(0, subtotal - discount);
+    return { subtotal, total, discount };
   };
 
   const validateForm = () => {
@@ -292,6 +296,7 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
         period_type: payment_type === 'installments' ? formData.period_type : undefined,
         number_of_installments: payment_type === 'installments' ? formData.number_of_installments : undefined,
         notes: formData.notes,
+        discount_amount: formData.discount_amount,
         date: dateISO
       };
 
@@ -303,7 +308,8 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
         payment_method: 'cash',
         period_type: 'monthly',
         number_of_installments: 6,
-        notes: ''
+        notes: '',
+        discount_amount: 0
       });
       setItems([]);
       setErrors({});
@@ -316,14 +322,14 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
     }
   };
 
-  const { subtotal, total } = calculateTotals();
+  const { subtotal, total, discount } = calculateTotals();
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="max-w-[85vw] w-full max-h-[92vh] overflow-hidden p-0 rounded-xl border-none shadow-2xl bg-background/95 backdrop-blur-xl"
+        className="max-w-6xl antialiased w-[95vw] lg:w-full h-[90vh] lg:h-auto lg:max-h-[85vh] overflow-hidden p-0 rounded-xl border-none shadow-2xl bg-background/90 backdrop-blur-xl"
       >
-        <div className="flex flex-col h-full max-h-[92vh]">
+        <div className="flex flex-col h-full max-h-[90vh] lg:max-h-[85vh]">
           <DialogHeader className="p-6 pb-2">
             <div className="flex items-center gap-4">
               <ShoppingCart className="h-6 w-6 text-primary" />
@@ -338,9 +344,9 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
             </div>
           </DialogHeader>
 
-          <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto px-6 pb-6 space-y-6">
-            <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
-              <div className="xl:col-span-8 space-y-6">
+          <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto px-6 pb-6 space-y-6 custom-scrollbar">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2 space-y-6">
                 {/* Sections Grid */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {/* Cliente Section */}
@@ -368,7 +374,7 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
                               type="button"
                               variant="ghost"
                               size="sm"
-                              className="h-7 px-2 text-[10px] font-bold uppercase tracking-tighter opacity-0 group-hover:opacity-100 transition-all hover:bg-background rounded-md"
+                              className="h-7 px-2 text-xs font-bold uppercase tracking-tighter opacity-0 group-hover:opacity-100 transition-all hover:bg-background rounded-md"
                               onClick={openCustomerDialog}
                             >
                               Cambiar
@@ -392,7 +398,7 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
                           </Button>
                         )}
                         {errors.customer_id && (
-                          <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-red-500 mt-2 ml-1">
+                          <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest text-red-500 mt-2 ml-1">
                             <AlertCircle className="h-3 w-3" />
                             {errors.customer_id}
                           </div>
@@ -410,7 +416,7 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
 
                     <div className="grid grid-cols-2 gap-3">
                       <div className="space-y-1.5">
-                        <Label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground ml-1">Modalidad</Label>
+                        <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">Modalidad</Label>
                         <Select
                           value={formData.payment_type}
                           onValueChange={(value: any) => setFormData(prev => ({ ...prev, payment_type: value }))}
@@ -425,7 +431,7 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
                         </Select>
                       </div>
                       <div className="space-y-1.5">
-                        <Label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground ml-1">Cobro</Label>
+                        <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">Cobro</Label>
                         <Select
                           value={formData.payment_method}
                           onValueChange={(value: any) => setFormData(prev => ({ ...prev, payment_method: value }))}
@@ -444,7 +450,7 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
                     {formData.payment_type === 'installments' && (
                       <div className="grid grid-cols-2 gap-3 mt-3 pt-3 border-t border-border/20 animate-in fade-in slide-in-from-top-2 duration-300">
                         <div className="space-y-1.5">
-                          <Label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground ml-1">Cuotas</Label>
+                          <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">Cuotas</Label>
                           <Input
                             type="number"
                             min="2"
@@ -466,7 +472,7 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
                           />
                         </div>
                         <div className="space-y-1.5">
-                          <Label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground ml-1">Frecuencia</Label>
+                          <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">Frecuencia</Label>
                           <Select
                             value={formData.period_type}
                             onValueChange={(value: any) => setFormData(prev => ({ ...prev, period_type: value }))}
@@ -514,16 +520,16 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
                         {items.map((item, index) => (
                           <div
                             key={index}
-                            className="group flex flex-wrap md:flex-nowrap items-center gap-3 p-3 bg-muted/20 hover:bg-muted/40 rounded-lg border border-border/40 transition-all animate-in fade-in slide-in-from-right-2 duration-300"
+                            className="group grid grid-cols-1 sm:grid-cols-12 items-end gap-3 p-4 bg-muted/20 hover:bg-muted/40 rounded-xl border border-border/40 transition-all animate-in fade-in slide-in-from-right-2 duration-300"
                           >
-                            <div className="flex-1 min-w-[180px]">
-                              <Label className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground mb-1 block ml-1">Producto</Label>
+                            <div className="sm:col-span-5 space-y-1.5">
+                              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">Producto</Label>
                               {item.product_id != null ? (
                                 <Select
                                   value={item.product_id.toString()}
                                   onValueChange={(value) => updateItem(index, 'product_id', parseInt(value))}
                                 >
-                                  <SelectTrigger className="h-9 rounded-md bg-background/50 border-none font-bold text-xs">
+                                  <SelectTrigger className="h-10 rounded-lg bg-background/50 border-none font-bold text-xs ring-1 ring-border/50">
                                     <SelectValue />
                                   </SelectTrigger>
                                   <SelectContent className="rounded-lg border-none shadow-xl">
@@ -538,25 +544,27 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
                                 <Input
                                   value={item.product_name}
                                   onChange={(e) => updateItem(index, 'product_name', e.target.value)}
-                                  className="h-9 rounded-md bg-background/50 border-none font-bold text-xs"
+                                  className="h-10 rounded-lg bg-background/50 border-none font-bold text-xs ring-1 ring-border/50"
                                   placeholder="Nombre personalizado"
                                 />
                               )}
                             </div>
-                            <div className="w-20">
-                              <Label className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground mb-1 block text-center">Cant.</Label>
+
+                            <div className="sm:col-span-2 space-y-1.5">
+                              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground block text-center">Cant.</Label>
                               <Input
                                 type="number"
                                 min="1"
                                 value={item.quantity}
                                 onChange={(e) => updateItem(index, 'quantity', parseInt(e.target.value) || 1)}
-                                className="h-9 rounded-md bg-background/50 border-none font-bold text-xs text-center"
+                                className="h-10 rounded-lg bg-background/50 border-none font-bold text-xs text-center ring-1 ring-border/50"
                               />
                             </div>
-                            <div className="w-28">
-                              <Label className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground mb-1 block ml-1">Precio Unit.</Label>
+
+                            <div className="sm:col-span-2 space-y-1.5">
+                              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">Precio</Label>
                               <div className="relative">
-                                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground font-bold text-xs">$</span>
+                                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground font-bold text-xs">$</span>
                                 <Input
                                   type="number"
                                   value={priceBuffers[index] ?? String(item.unit_price)}
@@ -573,23 +581,25 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
                                     }
                                     setPriceBuffers(prev => ({ ...prev, [index]: undefined }));
                                   }}
-                                  className="h-9 pl-6 pr-2 rounded-md bg-background/50 border-none font-bold text-xs"
+                                  className="h-10 pl-7 pr-2 rounded-lg bg-background/50 border-none font-bold text-xs ring-1 ring-border/50"
                                 />
                               </div>
                             </div>
-                            <div className="w-28">
-                              <Label className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground mb-1 block text-right mr-1">Total</Label>
-                              <div className="h-9 flex items-center justify-end px-3 rounded-md bg-primary/5 text-primary font-bold text-xs border border-primary/10">
+
+                            <div className="sm:col-span-2 space-y-1.5">
+                              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground text-right mr-1">Total</Label>
+                              <div className="h-10 flex items-center justify-end px-3 rounded-lg bg-primary/10 text-primary font-bold text-xs border border-primary/20">
                                 {formatCurrency(item.line_total)}
                               </div>
                             </div>
-                            <div className="pt-4">
+
+                            <div className="sm:col-span-1 flex justify-center pb-0.5">
                               <Button
                                 type="button"
                                 variant="ghost"
                                 size="icon"
                                 onClick={() => removeItem(index)}
-                                className="h-9 w-9 text-red-500 hover:bg-red-500/10 hover:text-red-600 rounded-md"
+                                className="h-9 w-9 text-red-500 hover:bg-red-500/10 hover:text-red-600 rounded-lg"
                               >
                                 <Trash2 className="h-4 w-4" />
                               </Button>
@@ -599,7 +609,7 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
                       </div>
                     )}
                     {errors.items && (
-                      <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-red-500 mt-4 ml-2">
+                      <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest text-red-500 mt-4 ml-2">
                         <AlertCircle className="h-3.5 w-3.5" />
                         {errors.items}
                       </div>
@@ -609,7 +619,7 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
               </div>
 
               {/* Sidebar: Summary & Extras */}
-              <div className="xl:col-span-4 space-y-4">
+              <div className="lg:col-span-1 space-y-4">
                 <div className="bg-primary/5 dark:bg-primary/10 backdrop-blur-md p-6 rounded-xl border border-primary/10 shadow-inner sticky top-0">
                   <div className="flex items-center gap-2 mb-6">
                     <Calculator className="h-5 w-5 text-primary" />
@@ -618,14 +628,34 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
 
                   <div className="space-y-4">
                     <div className="flex justify-between items-center text-sm font-medium">
-                      <span className="text-muted-foreground uppercase tracking-widest text-[10px]">Subtotal</span>
+                      <span className="text-muted-foreground uppercase tracking-widest text-xs">Subtotal</span>
                       <span className="font-bold">{formatCurrency(subtotal)}</span>
+                    </div>
+
+                    <div className="flex justify-between items-center group">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-muted-foreground uppercase tracking-widest text-xs">Descuento</span>
+                        <span className="text-[10px] opacity-40 italic">Monto fijo</span>
+                      </div>
+                      <div className="relative w-24">
+                        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground font-bold text-[10px]">$</span>
+                        <Input
+                          type="number"
+                          min="0"
+                          value={formData.discount_amount || ''}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            setFormData(prev => ({ ...prev, discount_amount: isNaN(val) ? 0 : val }));
+                          }}
+                          className="h-8 pl-5 pr-2 rounded-lg bg-background/50 border-none font-bold text-right text-xs ring-1 ring-border/50"
+                        />
+                      </div>
                     </div>
 
                     <div className="h-px bg-primary/10" />
 
                     <div className="flex justify-between items-end">
-                      <span className="text-muted-foreground uppercase tracking-widest text-[11px] pb-1 font-bold">Total a Cobrar</span>
+                      <span className="text-muted-foreground uppercase tracking-widest text-xs pb-1 font-bold">Total a Cobrar</span>
                       <span className="text-2xl font-black text-primary tracking-tighter tabular-nums">
                         {formatCurrency(total)}
                       </span>
@@ -636,7 +666,7 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
                         <div className="flex flex-col gap-3 p-4 bg-primary/10 rounded-lg border border-primary/20">
                           <div className="flex items-center gap-2">
                             <CreditCard className="h-4 w-4 text-primary" />
-                            <span className="text-[10px] font-black uppercase tracking-tighter text-primary">Detalle de Cuotas</span>
+                            <span className="text-xs font-black uppercase tracking-tighter text-primary">Detalle de Cuotas</span>
                           </div>
                           <div className="flex justify-between items-center">
                             <span className="text-xs font-semibold opacity-70">Pago {formData.period_type === 'monthly' ? 'Mensual' : formData.period_type === 'biweekly' ? 'Quincenal' : 'Semanal'}</span>
@@ -645,7 +675,7 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
                             </span>
                           </div>
                           <div className="flex justify-between items-center opacity-70">
-                            <span className="text-[10px] font-bold uppercase tracking-wide">Plazo Final</span>
+                            <span className="text-xs font-bold uppercase tracking-wide">Plazo Final</span>
                             <span className="text-xs font-bold">{formData.number_of_installments} Pagos</span>
                           </div>
                         </div>
@@ -655,7 +685,7 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
                     <div className="space-y-4 pt-4 mt-4 border-t border-primary/10">
                       <div className="space-y-1.5">
                         <div className="flex items-center justify-between">
-                          <Label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground ml-1">Fecha de Venta</Label>
+                          <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">Fecha de Venta</Label>
                           <TooltipProvider delayDuration={0}>
                             <Tooltip>
                               <TooltipTrigger asChild>
@@ -682,7 +712,7 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
                       </div>
 
                       <div className="space-y-1.5">
-                        <Label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground ml-1">Notas Internas</Label>
+                        <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground ml-1">Notas Internas</Label>
                         <Textarea
                           value={formData.notes}
                           onChange={(e) => setFormData(prev => ({ ...prev, notes: e.target.value }))}
@@ -698,7 +728,7 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
                     <Button
                       type="submit"
                       disabled={isSubmitting}
-                      className="w-full h-12 rounded-lg bg-primary hover:bg-primary/90 text-primary-foreground transition-all font-black uppercase tracking-widest text-[11px] group"
+                      className="w-full h-12 rounded-lg bg-primary hover:bg-primary/90 text-primary-foreground transition-all font-black uppercase tracking-widest text-xs group"
                     >
                       {isSubmitting ? (
                         <div className="h-4 w-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />
@@ -713,7 +743,7 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
                       type="button"
                       variant="ghost"
                       onClick={() => onOpenChange(false)}
-                      className="w-full h-10 rounded-lg font-bold uppercase tracking-tighter text-[10px] opacity-40 hover:opacity-100 transition-opacity"
+                      className="w-full h-10 rounded-lg font-bold uppercase tracking-tighter text-xs opacity-40 hover:opacity-100 transition-opacity"
                     >
                       Cancelar
                     </Button>
@@ -774,11 +804,11 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
               </div>
               {productQuery.trim() && (
                 <div className="p-3 bg-primary/5 rounded-lg border border-primary/10 flex items-center justify-between gap-4">
-                  <p className="text-[10px] font-bold uppercase tracking-widest opacity-60">¿No está en el catálogo?</p>
+                  <p className="text-xs font-bold uppercase tracking-widest opacity-60">¿No está en el catálogo?</p>
                   <Button
                     type="button"
                     variant="link"
-                    className="text-[10px] font-black uppercase tracking-widest h-auto p-0 text-primary"
+                    className="text-xs font-black uppercase tracking-widest h-auto p-0 text-primary"
                     onClick={() => addCustomProductByName(productQuery)}
                   >
                     Usar &quot;{productQuery}&quot;
@@ -829,7 +859,7 @@ export function SaleForm({ sale, open, onOpenChange, onSave }: SaleFormProps) {
                         </div>
                         <div className="flex flex-col">
                           <span className="font-bold text-sm tracking-tight">{c.name}</span>
-                          {c.dni && <span className="text-[10px] font-medium opacity-50">{c.dni}</span>}
+                          {c.dni && <span className="text-xs font-medium opacity-50">{c.dni}</span>}
                         </div>
                       </div>
                     </button>

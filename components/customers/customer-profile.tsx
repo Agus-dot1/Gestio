@@ -32,6 +32,7 @@ import type { Customer, Sale, Installment, SaleItem } from '@/lib/database-opera
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog';
+import { formatCurrency } from '@/config/locale';
 
 interface CustomerProfileProps {
   customer: Customer;
@@ -47,14 +48,7 @@ interface CustomerStats {
   firstPurchaseDate: string | null;
 }
 
-function formatCurrency(amount: number): string {
-  return new Intl.NumberFormat('es-AR', {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
-  }).format(amount);
-}
+
 
 export function CustomerProfile({ customer, onClose }: CustomerProfileProps) {
   const [sales, setSales] = useState<Sale[]>([]);
@@ -198,6 +192,10 @@ export function CustomerProfile({ customer, onClose }: CustomerProfileProps) {
     return (
       <Dialog open={true} onOpenChange={(open) => { if (!open) onClose(); }}>
         <DialogContent className="max-w-5xl max-h-[90vh] overflow-hidden p-0 rounded-xl bg-background/95 backdrop-blur-xl border-none shadow-2xl">
+          <DialogHeader className="sr-only">
+            <DialogTitle>Cargando perfil del cliente</DialogTitle>
+            <DialogDescription>Espere mientras se obtienen los datos del cliente.</DialogDescription>
+          </DialogHeader>
           <div className="p-8 space-y-6">
             <div className="flex items-center gap-4">
               <Skeleton className="h-16 w-16 rounded-full" />
@@ -395,7 +393,7 @@ export function CustomerProfile({ customer, onClose }: CustomerProfileProps) {
                                     <Package className="h-4 w-4 text-primary" />
                                   </div>
                                   <div className="text-left">
-                                    <p className="font-bold text-sm flex items-center gap-2">
+                                    <div className="font-bold text-sm flex items-center gap-2">
                                       {title}
                                       {refCode && (
                                         <Badge
@@ -410,7 +408,7 @@ export function CustomerProfile({ customer, onClose }: CustomerProfileProps) {
                                           {copiedField === `ref-${saleId}` && <Check className="ml-1 h-3 w-3 text-green-500" />}
                                         </Badge>
                                       )}
-                                    </p>
+                                    </div>
                                     <p className="text-xs text-muted-foreground">
                                       {sale?.created_at ? new Date(sale.created_at).toLocaleDateString() : 'N/A'} • {insts.length} cuota(s) pendiente(s)
                                     </p>

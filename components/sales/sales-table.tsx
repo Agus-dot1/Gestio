@@ -10,21 +10,28 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Search, MoreHorizontal, Edit, Trash2, Eye, CreditCard, Calendar, DollarSign, ChevronLeft, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, Package, Plus } from 'lucide-react';
+import { Search, MoreHorizontal, Edit, Trash2, Eye, CreditCard, Calendar, DollarSign, ChevronLeft, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown, Package, Plus, User } from 'lucide-react';
+import { usePersistedState } from '@/hooks/use-persisted-state';
+
 import type { Sale } from '@/lib/database-operations';
 import { cn } from '@/lib/utils';
 import { Skeleton } from '@/components/ui/skeleton';
 import { SalesBulkOperations } from './sales-bulk-operations';
 import { SalesColumnToggle, type ColumnVisibility } from './sales-column-toggle';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import { Switch } from '../ui/switch';
+import { Label } from '../ui/label';
 import dynamic from 'next/dynamic';
-
-
+import { DataTablePagination } from '../ui/data-table-pagination';
 
 const SaleDetailModal = dynamic(() => import('./sale-detail-modal').then(m => m.SaleDetailModal), {
   ssr: false,
 });
 import { ButtonGroup } from '../ui/button-group';
 import { SalesFilters, SalesFiltersComponent, applySalesFilters } from './sales-filters';
+import { useSearchParams, useRouter, usePathname } from 'next/navigation';
+import { formatCurrency } from '@/config/locale';
 
 interface SalesTableProps {
   sales: Sale[];
@@ -40,98 +47,139 @@ interface SalesTableProps {
   onPageChange?: (page: number) => void;
   paginationInfo?: { total: number; totalPages: number; currentPage: number; pageSize: number };
   serverSidePagination?: boolean;
+  onViewInstallments?: (saleId: number) => void;
 }
 
-export function SalesTable({ 
-  sales, 
-  highlightId, 
-  onEdit, 
+export function SalesTable({
+  sales,
+  highlightId,
+  onEdit,
   onDelete,
   onBulkDelete,
-  onBulkStatusUpdate, 
+  onBulkStatusUpdate,
   isLoading = false,
   searchTerm: _externalSearchTerm,
   onSearchChange: _onSearchChange,
   currentPage,
   onPageChange,
   paginationInfo,
-  serverSidePagination = false
+  serverSidePagination = false,
+  onViewInstallments
 }: SalesTableProps) {
 
 
-  const [salesFilters, setSalesFilters] = useState<SalesFilters>({
-    search: '',
-    sortBy: 'date',
-    sortOrder: 'desc',
-    paymentStatus: [],
-    paymentType: [],
-    minAmount: null,
-    maxAmount: null,
-    dateAfter: null,
-    dateBefore: null
-  });
-  const [deleteSale, setDeleteSale] = useState<Sale | null>(null);
-  const [selectedSales, setSelectedSales] = useState<Set<number>>(new Set());
-  const [columnVisibility, setColumnVisibility] = useState<ColumnVisibility>({
-    sale_number: true,
-    customer_name: true,
-    date: true,
-    payment_type: true,
-    total_amount: true,
-    payment_status: true,
-    reference_code: true
-  });
-  const [detailSale, setDetailSale] = useState<Sale | null>(null);
-  const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
+  const router = useRouter();
 
+  // 1. Initial Highlight States from localStorage
+  const [stickyHighlight, setStickyHighlight] = usePersistedState<string | null>('stickyHighlight-sales', null);
 
+  // 2. Auto-scroll preference state
+  const [autoScrollEnabled, setAutoScrollEnabled] = usePersistedState<boolean>('gestio-auto-scroll', true);
+
+  // 3. Initial State from URL
+  const highlightIdFromUrl = searchParams.get('highlight');
+
+  // 4. Source of Truth
+  const activeHighlight = highlightIdFromUrl || stickyHighlight;
+
+  // 5. Automatic Persistence & URL Cleaning
+  useEffect(() => {
+    if (highlightIdFromUrl) {
+      setStickyHighlight(highlightIdFromUrl);
+      // Clean the URL without reloading
+      const params = new URLSearchParams(searchParams);
+      params.delete('highlight');
+      router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+    }
+  }, [highlightIdFromUrl, pathname, router, searchParams]);
+
+  const handleClearHighlight = () => {
+    setStickyHighlight(null);
+    if (highlightIdFromUrl) {
+      const params = new URLSearchParams(searchParams);
+      params.delete('highlight');
+      router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+    }
+  };
+
+  // 6. Scroll to highlighted item
+  useEffect(() => {
+    // Only scroll if autoScrollEnabled is true AND we have an activeHighlight
+    // We use a small delay to ensure the element is rendered (especially after tab changes)
+    if (activeHighlight && autoScrollEnabled) {
+      const timer = setTimeout(() => {
+        const element = document.getElementById(`venta-${activeHighlight}`);
+        if (element) {
+          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [activeHighlight, autoScrollEnabled]);
 
   const SALES_PERSIST_KEY = 'salesTablePrefs';
 
-
-
-  useEffect(() => {
-    try {
-      const raw = typeof window !== 'undefined' ? localStorage.getItem(SALES_PERSIST_KEY) : null;
-      if (raw) {
-        const prefs = JSON.parse(raw);
-        if (prefs?.salesFilters) {
-          const f = prefs.salesFilters;
-          setSalesFilters(prev => ({
-            ...prev,
-            ...f,
-            dateAfter: f?.dateAfter ? new Date(f.dateAfter) : null,
-            dateBefore: f?.dateBefore ? new Date(f.dateBefore) : null,
-          }));
-        }
-        if (prefs?.columnVisibility) {
-          setColumnVisibility(prev => ({ ...prev, ...prefs.columnVisibility }));
-        }
+  const [prefs, setPrefs] = usePersistedState<{
+    salesFilters: SalesFilters;
+    columnVisibility: ColumnVisibility;
+  }>(
+    SALES_PERSIST_KEY,
+    {
+      salesFilters: {
+        search: '',
+        sortBy: 'date',
+        sortOrder: 'desc',
+        paymentStatus: [],
+        paymentType: [],
+        minAmount: null,
+        maxAmount: null,
+        dateAfter: null,
+        dateBefore: null
+      },
+      columnVisibility: {
+        sale_number: true,
+        customer_name: true,
+        date: true,
+        payment_type: true,
+        total_amount: true,
+        payment_status: true,
+        reference_code: true
       }
-    } catch (e) {
-      console.warn('Failed to load sales table prefs:', e);
-    }
-  }, []);
-
-
-
-  useEffect(() => {
-    try {
-      const prefs = {
-        salesFilters: {
-          ...salesFilters,
-          dateAfter: salesFilters.dateAfter ? salesFilters.dateAfter.toISOString() : null,
-          dateBefore: salesFilters.dateBefore ? salesFilters.dateBefore.toISOString() : null,
-        },
-        columnVisibility,
-      };
-      if (typeof window !== 'undefined') {
-        localStorage.setItem(SALES_PERSIST_KEY, JSON.stringify(prefs));
+    },
+    {
+      deserialize: (raw) => {
+        const parsed = JSON.parse(raw);
+        if (parsed.salesFilters) {
+          if (parsed.salesFilters.dateAfter) parsed.salesFilters.dateAfter = new Date(parsed.salesFilters.dateAfter);
+          if (parsed.salesFilters.dateBefore) parsed.salesFilters.dateBefore = new Date(parsed.salesFilters.dateBefore);
+        }
+        return parsed;
       }
-    } catch (e) {
-      console.warn('Failed to save sales table prefs:', e);
     }
-  }, [salesFilters, columnVisibility]);
+  );
+
+  const salesFilters = prefs.salesFilters;
+  const setSalesFilters = (value: SalesFilters | ((curr: SalesFilters) => SalesFilters)) => {
+    setPrefs(prev => ({
+      ...prev,
+      salesFilters: typeof value === 'function' ? value(prev.salesFilters) : value
+    }));
+  };
+
+  const columnVisibility = prefs.columnVisibility;
+  const setColumnVisibility = (value: ColumnVisibility | ((curr: ColumnVisibility) => ColumnVisibility)) => {
+    setPrefs(prev => ({
+      ...prev,
+      columnVisibility: typeof value === 'function' ? value(prev.columnVisibility) : value
+    }));
+  };
+
+  const [deleteSale, setDeleteSale] = useState<Sale | null>(null);
+  const [selectedSales, setSelectedSales] = useState<Set<number>>(new Set());
+  const [detailSale, setDetailSale] = useState<Sale | null>(null);
+  const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
 
 
 
@@ -191,30 +239,10 @@ export function SalesTable({
 
 
 
-  const [clientPage, setClientPage] = useState(1);
-  const clientPageSize = 10;
-
-
-
-  useEffect(() => {
-    setClientPage(1);
-  }, [salesFilters, sales]);
-
-  const totalClientPages = useMemo(() => {
-    return Math.max(1, Math.ceil(visibleSales.length / clientPageSize));
-  }, [visibleSales.length]);
-
-  const paginatedSales = useMemo(() => {
-    if (serverSidePagination) return visibleSales;
-    const start = (clientPage - 1) * clientPageSize;
-    return visibleSales.slice(start, start + clientPageSize);
-  }, [visibleSales, clientPage, serverSidePagination]);
-
-  const handleDelete = async () => {
+  const deleteSaleAction = async () => {
     if (deleteSale?.id) {
       await onDelete(deleteSale.id);
       setDeleteSale(null);
-
 
       setSelectedSales(prev => {
         const newSet = new Set(prev);
@@ -224,9 +252,13 @@ export function SalesTable({
     }
   };
 
+  const handleDelete = async () => {
+    await deleteSaleAction();
+  };
+
   const handleSelectSale = (saleId: number | undefined, checked: boolean) => {
     if (saleId === undefined) return;
-    
+
     const newSelected = new Set(selectedSales);
     if (checked) {
       newSelected.add(saleId);
@@ -341,28 +373,7 @@ export function SalesTable({
     });
   };
 
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('es-ES', {
-      style: 'currency',
-      currency: 'ARS'
-    }).format(amount);
-  };
-
   const getPaymentStatusBadge = (status: string) => {
-    const variants = {
-      paid: 'default',
-      partial: 'secondary',
-      unpaid: 'destructive',
-      overdue: 'destructive'
-    } as const;
-
-    const colors = {
-      paid: 'bg-green-100 text-green-800 hover:bg-green-200',
-      partial: 'bg-yellow-100 text-yellow-800 hover:bg-yellow-200',
-      unpaid: 'bg-gray-100 text-gray-800 hover:bg-gray-200',
-      overdue: 'bg-red-100 text-red-800 hover:bg-red-200'
-    } as const;
-
     const statusLabels = {
       paid: 'Pagado',
       partial: 'Parcial',
@@ -370,119 +381,106 @@ export function SalesTable({
       overdue: 'Vencido'
     } as const;
 
+    const getStyles = (s: string) => {
+      switch (s) {
+        case 'paid':
+          return "bg-green-500/10 text-green-600 hover:bg-green-500/20 border-green-500/20";
+        case 'partial':
+          return "bg-yellow-500/10 text-yellow-600 hover:bg-yellow-500/20 border-yellow-500/20";
+        case 'overdue':
+          return "bg-red-500/10 text-red-600 hover:bg-red-500/20 border-red-500/20";
+        case 'unpaid':
+          return "bg-primary/10 text-primary hover:bg-primary/20 border-primary/20";
+        default:
+          return "bg-primary/10 text-primary hover:bg-primary/20 border-primary/20";
+      }
+    };
+
     return (
-      <Badge variant={variants[status as keyof typeof variants]} className={colors[status as keyof typeof colors]}>
+      <Badge className={cn("border", getStyles(status))}>
         {statusLabels[status as keyof typeof statusLabels] || status.charAt(0).toUpperCase() + status.slice(1)}
       </Badge>
     );
   };
 
   const getPaymentTypeBadge = (type: string) => {
-    const colors = {
-      cash: 'bg-blue-100 text-blue-800',
-      installments: 'bg-purple-100 text-purple-800',
-    } as const;
-
     const typeLabels = {
       cash: 'Efectivo',
       installments: 'Cuotas',
     } as const;
 
+    const getStyles = (t: string) => {
+      switch (t) {
+        case 'cash':
+          return "bg-blue-500/10 text-blue-600 hover:bg-blue-500/20 border-blue-500/20";
+        case 'installments':
+          return "bg-purple-500/10 text-purple-600 hover:bg-purple-500/20 border-purple-500/20";
+        default:
+          return "bg-primary/10 text-primary hover:bg-primary/20 border-primary/20";
+      }
+    };
+
     return (
-      <Badge variant="outline" className={colors[type as keyof typeof colors]}>
+      <Badge className={cn("border", getStyles(type))}>
         {typeLabels[type as keyof typeof typeLabels] || type.charAt(0).toUpperCase() + type.slice(1)}
       </Badge>
     );
   };
 
-  const renderProductsCell = (sale: Sale) => {
-    const items = sale.items || [];
-    
-    if (items.length === 0) {
-      return (
-        <div className="flex items-center gap-2 text-muted-foreground">
-          <Package className="w-4 h-4" />
-          <span className="text-sm">Sin productos</span>
-        </div>
-      );
-    }
 
-    const firstProduct = items[0];
-    const hasMultipleItems = items.length > 1;
-
-    return (
-      <div className="flex items-center gap-2 short:gap-1">
-        <div className="w-8 h-8 short:w-6 short:h-6 bg-primary/10 rounded-full flex items-center justify-center">
-          <Package className="w-4 h-4 text-primary" />
-        </div>
-        <div className="flex items-center gap-2 short:gap-1">
-          <span className="font-medium">{firstProduct.product_name}</span>
-          {hasMultipleItems && (
-            <Popover>
-              <PopoverTrigger asChild>
-                <Button 
-                  variant="outline" 
-                  size="sm" 
-                  className="h-6 px-2 text-xs"
-                >
-                  +{items.length - 1} más
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-80" align="start">
-                <div className="space-y-2">
-                  <h4 className="font-medium text-sm">Productos en esta venta:</h4>
-                  <div className="space-y-1 max-h-48 overflow-y-auto">
-                    {items.map((item, index) => (
-                      <div key={index} className="flex items-center justify-between text-sm p-2 bg-muted/50 rounded">
-                        <div className="flex items-center gap-2">
-                          <Package className="w-3 h-3 text-muted-foreground" />
-                          <span>{item.product_name}</span>
-                        </div>
-                        <div className="text-muted-foreground">
-                          x{item.quantity}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </PopoverContent>
-            </Popover>
-          )}
-        </div>
-        {highlightId === sale.id?.toString() && (
-          <Badge variant="outline" className="bg-primary/10 text-primary">
-            Encontrado
-          </Badge>
-        )}
-      </div>
-    );
-  };
 
   return (
     <>
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <SalesFiltersComponent
-                filters={salesFilters}
-                onFiltersChange={setSalesFilters}
-                sales={sales}
-              />
-              <SalesColumnToggle
-                columnVisibility={columnVisibility}
-                onColumnVisibilityChange={setColumnVisibility}
-              />
-                            {selectedSales.size > 0 && onBulkDelete && onBulkStatusUpdate && (
-                <SalesBulkOperations
-                  selectedSales={selectedSales}
+          <div className="flex flex-col gap-4">
+            {/* Highlight Banner */}
+            {activeHighlight && (
+              <div className="p-3 bg-primary/10 border border-primary/20 rounded-xl flex items-center justify-between animate-in fade-in slide-in-from-top-2">
+                <div className="flex items-center gap-2 text-sm text-primary font-medium">
+                  <Search className="h-4 w-4" />
+                  <span>Elemento resaltado (ID: {activeHighlight})</span>
+                </div>
+                <div className="flex gap-4 items-center">
+                  <div className="flex items-center gap-2 px-3 border-r border-primary/20">
+                    <Switch
+                      id="auto-scroll-sales-table"
+                      checked={autoScrollEnabled}
+                      onCheckedChange={setAutoScrollEnabled}
+                    />
+                    <Label htmlFor="auto-scroll-sales-table" className="text-[10px] uppercase font-bold tracking-wider opacity-70 cursor-pointer whitespace-nowrap">
+                      Auto-scroll
+                    </Label>
+                  </div>
+                  <Button size="sm" variant="ghost" onClick={handleClearHighlight} className="h-8">
+                    Quitar resalte
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <SalesFiltersComponent
+                  filters={salesFilters}
+                  onFiltersChange={setSalesFilters}
                   sales={sales}
-                  onBulkDelete={handleBulkDelete}
-                  onBulkStatusUpdate={handleBulkStatusUpdate}
-                  onClearSelection={clearSelection}
-                  isLoading={isLoading}
                 />
-              )}  
+                <SalesColumnToggle
+                  columnVisibility={columnVisibility}
+                  onColumnVisibilityChange={setColumnVisibility}
+                />
+                {selectedSales.size > 0 && onBulkDelete && onBulkStatusUpdate && (
+                  <SalesBulkOperations
+                    selectedSales={selectedSales}
+                    sales={sales}
+                    onBulkDelete={handleBulkDelete}
+                    onBulkStatusUpdate={handleBulkStatusUpdate}
+                    onClearSelection={clearSelection}
+                    isLoading={isLoading}
+                  />
+                )}
+              </div>
             </div>
           </div>
         </CardHeader>
@@ -504,89 +502,47 @@ export function SalesTable({
                     )}
                     {columnVisibility.sale_number && (
                       <TableHead>
-                        <Button 
-                          variant="ghost" 
-                          onClick={() => handleSort('sale_number')}
+                        <Button
+                          variant="ghost"
                           className="h-auto p-0 font-semibold hover:bg-transparent"
                         >
-                          Productos
-                          {getSortIcon('sale_number')}
-                        </Button>
-                      </TableHead>
-                    )}
-                    {columnVisibility.reference_code && (
-                      <TableHead>
-                        <Button 
-                          variant="ghost" 
-                          onClick={() => handleSort('reference_code')}
-                          className="h-auto p-0 font-semibold hover:bg-transparent"
-                        >
-                          Referencia
-                          {getSortIcon('reference_code')}
+                          Venta / Ref
                         </Button>
                       </TableHead>
                     )}
                     {columnVisibility.customer_name && (
                       <TableHead>
-                        <Button 
-                          variant="ghost" 
-                          onClick={() => handleSort('customer_name')}
-                          className="h-auto p-0 font-semibold hover:bg-transparent"
-                        >
-                          Cliente
-                          {getSortIcon('customer_name')}
-                        </Button>
-                      </TableHead>
-                    )}
-                    {columnVisibility.date && (
-                      <TableHead>
-                        <Button 
-                          variant="ghost" 
+                        <Button
+                          variant="ghost"
                           onClick={() => handleSort('date')}
                           className="h-auto p-0 font-semibold hover:bg-transparent"
                         >
-                          Fecha
+                          Cliente / Fecha
                           {getSortIcon('date')}
-                        </Button>
-                      </TableHead>
-                    )}
-                    {columnVisibility.payment_type && (
-                      <TableHead>
-                        <Button 
-                          variant="ghost" 
-                          onClick={() => handleSort('payment_type')}
-                          className="h-auto p-0 font-semibold hover:bg-transparent"
-                        >
-                          Método de pago
-                          {getSortIcon('payment_type')}
                         </Button>
                       </TableHead>
                     )}
                     {columnVisibility.total_amount && (
                       <TableHead>
-                        <Button 
-                          variant="ghost" 
-                          onClick={() => handleSort('total_amount')}
+                        <Button
+                          variant="ghost"
                           className="h-auto p-0 font-semibold hover:bg-transparent"
                         >
-                          Total
-                          {getSortIcon('total_amount')}
+                          Total / Método
                         </Button>
                       </TableHead>
                     )}
                     {columnVisibility.payment_status && (
                       <TableHead>
-                        <Button 
-                          variant="ghost" 
-                          onClick={() => handleSort('payment_status')}
+                        <Button
+                          variant="ghost"
                           className="h-auto p-0 font-semibold hover:bg-transparent"
                         >
-                          Estado del pago
-                          {getSortIcon('payment_status')}
+                          Estado
                         </Button>
                       </TableHead>
                     )}
-                    <TableHead className="w-[70px]">Acciones</TableHead>
+                    <TableHead className="text-right">Acciones</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -601,36 +557,30 @@ export function SalesTable({
                         <TableCell>
                           <div className="flex items-center gap-2">
                             <Skeleton className="w-8 h-8 rounded-full" />
-                            <Skeleton className="h-4 w-32" />
+                            <div className="space-y-1">
+                              <Skeleton className="h-4 w-32" />
+                              <Skeleton className="h-3 w-20" />
+                            </div>
                           </div>
-                        </TableCell>
-                      )}
-                      {columnVisibility.reference_code && (
-                        <TableCell>
-                          <Skeleton className="h-4 w-24" />
                         </TableCell>
                       )}
                       {columnVisibility.customer_name && (
                         <TableCell>
                           <div className="flex items-center gap-2">
-                            <Skeleton className="w-6 h-6 rounded-full" />
-                            <Skeleton className="h-4 w-32" />
+                            <Skeleton className="w-8 h-8 rounded-full" />
+                            <div className="space-y-1">
+                              <Skeleton className="h-4 w-24" />
+                              <Skeleton className="h-3 w-16" />
+                            </div>
                           </div>
-                        </TableCell>
-                      )}
-                      {columnVisibility.date && (
-                        <TableCell>
-                          <Skeleton className="h-4 w-24" />
-                        </TableCell>
-                      )}
-                      {columnVisibility.payment_type && (
-                        <TableCell>
-                          <Skeleton className="h-6 w-20 rounded-full" />
                         </TableCell>
                       )}
                       {columnVisibility.total_amount && (
                         <TableCell>
-                          <Skeleton className="h-4 w-28" />
+                          <div className="space-y-1">
+                            <Skeleton className="h-4 w-24" />
+                            <Skeleton className="h-4 w-16 rounded-full" />
+                          </div>
                         </TableCell>
                       )}
                       {columnVisibility.payment_status && (
@@ -638,8 +588,12 @@ export function SalesTable({
                           <Skeleton className="h-6 w-16 rounded-full" />
                         </TableCell>
                       )}
-                      <TableCell>
-                        <Skeleton className="h-8 w-8 rounded" />
+                      <TableCell className="text-right">
+                        <div className="flex justify-end gap-1">
+                          <Skeleton className="h-8 w-8 rounded" />
+                          <Skeleton className="h-8 w-8 rounded" />
+                          <Skeleton className="h-8 w-8 rounded" />
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -671,99 +625,59 @@ export function SalesTable({
                     )}
                     {columnVisibility.sale_number && (
                       <TableHead>
-                        <Button 
-                          variant="ghost" 
-                          onClick={() => handleSort('sale_number')}
+                        <Button
+                          variant="ghost"
                           className="h-auto p-0 font-semibold hover:bg-transparent"
                         >
-                          Venta #
-                          {getSortIcon('sale_number')}
-                        </Button>
-                      </TableHead>
-                    )}
-                    {columnVisibility.reference_code && (
-                      <TableHead>
-                        <Button 
-                          variant="ghost" 
-                          onClick={() => handleSort('reference_code')}
-                          className="h-auto p-0 font-semibold hover:bg-transparent"
-                        >
-                          Referencia
-                          {getSortIcon('reference_code')}
+                          Venta / Ref
                         </Button>
                       </TableHead>
                     )}
                     {columnVisibility.customer_name && (
                       <TableHead>
-                        <Button 
-                          variant="ghost" 
-                          onClick={() => handleSort('customer_name')}
-                          className="h-auto p-0 font-semibold hover:bg-transparent"
-                        >
-                          Cliente
-                          {getSortIcon('customer_name')}
-                        </Button>
-                      </TableHead>
-                    )}
-                    {columnVisibility.date && (
-                      <TableHead>
-                        <Button 
-                          variant="ghost" 
+                        <Button
+                          variant="ghost"
                           onClick={() => handleSort('date')}
                           className="h-auto p-0 font-semibold hover:bg-transparent"
                         >
-                          Fecha
+                          Cliente / Fecha
                           {getSortIcon('date')}
-                        </Button>
-                      </TableHead>
-                    )}
-                    {columnVisibility.payment_type && (
-                      <TableHead>
-                        <Button 
-                          variant="ghost" 
-                          onClick={() => handleSort('payment_type')}
-                          className="h-auto p-0 font-semibold hover:bg-transparent"
-                        >
-                          Método de pago
-                          {getSortIcon('payment_type')}
                         </Button>
                       </TableHead>
                     )}
                     {columnVisibility.total_amount && (
                       <TableHead>
-                        <Button 
-                          variant="ghost" 
-                          onClick={() => handleSort('total_amount')}
+                        <Button
+                          variant="ghost"
                           className="h-auto p-0 font-semibold hover:bg-transparent"
                         >
-                          Total
-                          {getSortIcon('total_amount')}
+                          Total / Método
                         </Button>
                       </TableHead>
                     )}
                     {columnVisibility.payment_status && (
                       <TableHead>
-                        <Button 
-                          variant="ghost" 
-                          onClick={() => handleSort('payment_status')}
+                        <Button
+                          variant="ghost"
                           className="h-auto p-0 font-semibold hover:bg-transparent"
                         >
-                          Estado del pago
-                          {getSortIcon('payment_status')}
+                          Estado
                         </Button>
                       </TableHead>
                     )}
-                    <TableHead className="w-[70px]">Acciones</TableHead>
+                    <TableHead className="text-right">Acciones</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {(serverSidePagination ? visibleSales : paginatedSales).map((sale) => (
-                    <TableRow 
-                      key={sale.id} 
+                  {visibleSales.map((sale) => (
+                    <TableRow
+                      key={sale.id}
                       id={`venta-${sale.id}`}
                       className={cn(
-                        highlightId === sale.id?.toString() && 'bg-primary/5'
+                        "transition-colors relative",
+                        activeHighlight === sale.id?.toString() && "bg-primary/5 hover:bg-primary/10 after:absolute after:left-0 after:top-0 after:bottom-0 after:w-1 after:bg-primary"
                       )}
+                      aria-current={activeHighlight === sale.id?.toString() ? "true" : undefined}
                     >
                       {onBulkDelete && onBulkStatusUpdate && (
                         <TableCell>
@@ -776,54 +690,67 @@ export function SalesTable({
                         </TableCell>
                       )}
                       {columnVisibility.sale_number && (
-                        <TableCell className="font-medium">
-                          {renderProductsCell(sale)}
-                        </TableCell>
-                      )}
-                      {columnVisibility.reference_code && (
                         <TableCell>
-                          <div className="text-sm">
-                            {sale.reference_code ? `#${sale.reference_code}` : '-'}
+                          <div className="flex flex-col gap-1">
+                            <div className="flex items-center gap-2">
+                              <div className="w-8 h-8 bg-primary/10 rounded-full flex items-center justify-center">
+                                <Package className="w-4 h-4 text-primary" />
+                              </div>
+                              <div className="flex flex-col">
+                                <span>
+                                  {sale.reference_code ? (
+                                    <span className="font-semibold text-primary text-sm">
+                                      {sale.items && sale.items.length > 0 ? sale.items[0].product_name : 'Venta'}
+                                    </span>
+                                  ) : (
+                                    <span className="text-xs text-muted-foreground opacity-0">-</span>
+                                  )}
+                                </span>
+                                <span className="text-xs text-muted-foreground">
+                                  {sale.reference_code || (sale.items && sale.items.length > 0 ? sale.items[0].product_name : `Venta #${sale.sale_number}`)}
+                                </span>
+                              </div>
+                            </div>
                           </div>
                         </TableCell>
                       )}
                       {columnVisibility.customer_name && (
                         <TableCell>
-                          <div className="flex items-center gap-2">
-                            <div className="w-6 h-6 bg-muted rounded-full flex items-center justify-center">
-                              <span className="text-xs font-medium">
-                                {sale.customer_name?.charAt(0).toUpperCase()}
-                              </span>
+                          <div className="flex flex-col gap-1">
+                            <div className="flex items-center gap-2">
+                              <Avatar className="h-8 w-8">
+                                <AvatarFallback className="bg-muted text-[10px] font-bold">
+                                  {sale.customer_name?.charAt(0).toUpperCase()}
+                                </AvatarFallback>
+                              </Avatar>
+                              <div className="flex flex-col">
+                                <span className="font-semibold">{sale.customer_name}</span>
+                                <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                                  <Calendar className="w-3 h-3" />
+                                  {formatDate(sale.date)}
+                                </div>
+                              </div>
                             </div>
-                            {sale.customer_name}
-                          </div>
-                        </TableCell>
-                      )}
-                      {columnVisibility.date && (
-                        <TableCell>
-                          <div className="flex items-center gap-2 text-sm">
-                            <Calendar className="w-4 h-4 text-muted-foreground" />
-                            {formatDate(sale.date)}
-                          </div>
-                        </TableCell>
-                      )}
-                      {columnVisibility.payment_type && (
-                        <TableCell>
-                          <div className="flex items-center gap-1">
-                          {getPaymentTypeBadge(sale.payment_type)}
-                          {sale.payment_type === 'installments' && (
-                            <div className="text-xs text-muted-foreground">
-                              {sale.number_of_installments} pagos
-                            </div>
-                          )}
                           </div>
                         </TableCell>
                       )}
                       {columnVisibility.total_amount && (
                         <TableCell>
-                          <div className="flex items-center gap-1">
-                            <DollarSign className="w-4 h-4 text-green-600" />
-                            <span className="font-medium">{formatCurrency((Number(sale.total_amount ?? 0) > 0 ? Number(sale.total_amount) : (Array.isArray(sale.items) ? sale.items.reduce((acc: number, it: any) => acc + (Number(it.quantity || 0) * Number(it.unit_price || 0)), 0) : 0)))}</span>
+                          <div className="flex flex-col gap-1">
+                            <div className="flex items-center gap-1">
+                              <DollarSign className="w-4 h-4 text-green-500" />
+                              <span className="font-bold text-primary">
+                                {formatCurrency((Number(sale.total_amount ?? 0) > 0 ? Number(sale.total_amount) : (Array.isArray(sale.items) ? sale.items.reduce((acc: number, it: any) => acc + (Number(it.quantity || 0) * Number(it.unit_price || 0)), 0) : 0)))} ARS
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {getPaymentTypeBadge(sale.payment_type)}
+                              {sale.payment_type === 'installments' && (
+                                <span className="text-[10px] text-muted-foreground">
+                                  ({sale.number_of_installments})
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </TableCell>
                       )}
@@ -832,15 +759,76 @@ export function SalesTable({
                           {getPaymentStatusBadge(sale.payment_status)}
                         </TableCell>
                       )}
-                      <TableCell className="px-2 py-0">
-                          <ButtonGroup>
-                            <Button variant="outline" size="sm"  onClick={() => {
-                              setDetailSale(sale);
-                              setIsDetailModalOpen(true);
-                            }}>Ver detalles</Button>
-                            <Button variant="secondary" size="sm" onClick={() => onEdit(sale)}>Editar</Button>
-                            <Button variant="destructive" size="sm" onClick={() => setDeleteSale(sale)}>Eliminar</Button>
-                          </ButtonGroup>
+                      <TableCell className="text-right">
+                        <TooltipProvider>
+                          <div className="flex items-center justify-end gap-1">
+                            {sale.payment_type === 'installments' && (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-9 w-9 text-muted-foreground hover:text-primary"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (sale.id && onViewInstallments) {
+                                        onViewInstallments(sale.id);
+                                      }
+                                    }}
+                                  >
+                                    <Calendar className="h-5 w-5" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Ver historial de cuotas</TooltipContent>
+                              </Tooltip>
+                            )}
+
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-9 w-9 text-muted-foreground hover:text-primary"
+                                  onClick={() => {
+                                    setDetailSale(sale);
+                                    setIsDetailModalOpen(true);
+                                  }}
+                                >
+                                  <Eye className="h-5 w-5" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Ver detalles</TooltipContent>
+                            </Tooltip>
+
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-9 w-9 text-muted-foreground hover:text-primary"
+                                  onClick={() => onEdit(sale)}
+                                >
+                                  <Edit className="h-5 w-5" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Editar venta</TooltipContent>
+                            </Tooltip>
+
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-9 w-9 text-red-500 hover:text-red-600"
+                                  onClick={() => setDeleteSale(sale)}
+                                >
+                                  <Trash2 className="h-5 w-5" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Eliminar venta</TooltipContent>
+                            </Tooltip>
+                          </div>
+                        </TooltipProvider>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -852,75 +840,15 @@ export function SalesTable({
       </Card>
 
       {/* Pagination Controls */}
-      {serverSidePagination && paginationInfo && paginationInfo.totalPages > 1 && (
-        <div className="flex items-center justify-between px-2">
-          <div className="flex-1 text-sm text-muted-foreground">
-            Mostrando {((paginationInfo.currentPage - 1) * paginationInfo.pageSize) + 1} a{' '}
-            {Math.min(paginationInfo.currentPage * paginationInfo.pageSize, paginationInfo.total)} de{' '}
-            {paginationInfo.total} ventas
-          </div>
-          <div className="flex items-center space-x-6 lg:space-x-8">
-            <div className="flex items-center space-x-2">
-              <Button
-                variant="outline"
-                className="h-8 w-8 p-0"
-                onClick={() => onPageChange && onPageChange(paginationInfo.currentPage - 1)}
-                disabled={paginationInfo.currentPage <= 1}
-              >
-                <span className="sr-only">Ir a la página anterior</span>
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
-              <div className="flex w-[100px] items-center justify-center text-sm font-medium">
-                Página {paginationInfo.currentPage} de {paginationInfo.totalPages}
-              </div>
-              <Button
-                variant="outline"
-                className="h-8 w-8 p-0"
-                onClick={() => onPageChange && onPageChange(paginationInfo.currentPage + 1)}
-                disabled={paginationInfo.currentPage >= paginationInfo.totalPages}
-              >
-                <span className="sr-only">Ir a la página siguiente</span>
-                <ChevronRight className="h-4 w-4" />
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Client-side Pagination Controls */}
-      {!serverSidePagination && visibleSales.length > 0 && totalClientPages > 1 && (
-        <div className="flex items-center justify-between px-2">
-          <div className="flex-1 text-sm text-muted-foreground">
-            Mostrando {((clientPage - 1) * clientPageSize) + 1} a{' '}
-            {Math.min(clientPage * clientPageSize, visibleSales.length)} de{' '}
-            {visibleSales.length} ventas
-          </div>
-          <div className="flex items-center space-x-6 lg:space-x-8">
-            <div className="flex items-center space-x-2">
-              <Button
-                variant="outline"
-                className="h-8 w-8 p-0"
-                onClick={() => setClientPage(p => Math.max(1, p - 1))}
-                disabled={clientPage <= 1}
-              >
-                <span className="sr-only">Ir a la página anterior</span>
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
-              <div className="flex w-[100px] items-center justify-center text-sm font-medium">
-                Página {clientPage} de {totalClientPages}
-              </div>
-              <Button
-                variant="outline"
-                className="h-8 w-8 p-0"
-                onClick={() => setClientPage(p => Math.min(totalClientPages, p + 1))}
-                disabled={clientPage >= totalClientPages}
-              >
-                <span className="sr-only">Ir a la página siguiente</span>
-                <ChevronRight className="h-4 w-4" />
-              </Button>
-            </div>
-          </div>
-        </div>
+      {paginationInfo && (
+        <DataTablePagination
+          total={paginationInfo.total}
+          totalPages={paginationInfo.totalPages}
+          currentPage={paginationInfo.currentPage}
+          pageSize={paginationInfo.pageSize}
+          onPageChange={(page) => onPageChange?.(page)}
+          entityName="ventas"
+        />
       )}
 
       {/* Delete Confirmation Dialog */}

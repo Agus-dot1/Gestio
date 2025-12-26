@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
+import { usePersistedState } from '@/hooks/use-persisted-state';
 import { Button } from '@/components/ui/button';
 import { DashboardLayout } from '@/components/dashboard-layout';
 import { toast } from 'sonner';
@@ -39,28 +40,26 @@ export default function AjustesPage() {
   const [isExporting, setIsExporting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [isDeletingDatabase, setIsDeletingDatabase] = useState(false);
-  const [lastBackup, setLastBackup] = useState<string | null>(null);
-  const [reduceAnimations, setReduceAnimations] = useState<boolean>(false);
-  const [excelFormLayout, setExcelFormLayout] = useState<boolean>(false);
+  const [reduceAnimations, setReduceAnimations] = usePersistedState<boolean>('reduceAnimations', false);
+  const [excelFormLayout, setExcelFormLayout] = usePersistedState<boolean>('excelFormLayout', false);
+  const [lastBackupDate, setLastBackupDate] = usePersistedState<string | null>('lastBackupDate', null);
   const [isPurgingArchived, setIsPurgingArchived] = useState<boolean>(false);
+
+  const lastBackup = useMemo(() => {
+    if (!lastBackupDate) return null;
+    try {
+      return new Date(lastBackupDate).toLocaleString('es-ES');
+    } catch {
+      return null;
+    }
+  }, [lastBackupDate]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
       setIsElectron(!!window.electronAPI);
-      const savedReduce = localStorage.getItem('reduceAnimations');
-      setReduceAnimations(savedReduce === 'true');
-      const savedExcel = localStorage.getItem('excelFormLayout');
-      setExcelFormLayout(savedExcel === 'true');
-      loadLastBackupInfo();
     }
   }, []);
 
-  const loadLastBackupInfo = () => {
-    const lastBackupDate = localStorage.getItem('lastBackupDate');
-    if (lastBackupDate) {
-      setLastBackup(new Date(lastBackupDate).toLocaleString('es-ES'));
-    }
-  };
 
   const handleExportBackup = async () => {
     if (!isElectron) {
@@ -102,8 +101,7 @@ export default function AjustesPage() {
 
       const result = await window.electronAPI.backup.save(backupData);
       if (result.success) {
-        localStorage.setItem('lastBackupDate', new Date().toISOString());
-        setLastBackup(new Date().toLocaleString('es-ES'));
+        setLastBackupDate(new Date().toISOString());
         toast.success('Respaldo exportado exitosamente');
       } else {
         toast.error('Error al exportar respaldo: ' + result.error);
@@ -199,15 +197,11 @@ export default function AjustesPage() {
 
   const handleToggleReduceAnimations = (checked: boolean) => {
     setReduceAnimations(checked);
-    localStorage.setItem('reduceAnimations', String(checked));
-    window.dispatchEvent(new CustomEvent('app:settings-changed', { detail: { reduceAnimations: checked } }));
     toast.success('Preferencia guardada');
   };
 
   const handleToggleExcelLayout = (checked: boolean) => {
     setExcelFormLayout(checked);
-    localStorage.setItem('excelFormLayout', String(checked));
-    window.dispatchEvent(new CustomEvent('app:settings-changed', { detail: { excelFormLayout: checked } }));
     toast.success('Preferencia guardada');
   };
 
@@ -231,7 +225,7 @@ export default function AjustesPage() {
 
   return (
     <DashboardLayout>
-      <div className="flex flex-col h-full bg-background/50">
+      <div className="flex flex-col h-screen bg-background/50">
         <div className="flex-1 w-full max-w-5xl mx-auto p-6 md:p-10 space-y-10">
 
           {/* Header */}

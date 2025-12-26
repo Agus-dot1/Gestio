@@ -774,7 +774,7 @@ function setSchemaVersion(v: number) {
 
 export function getLatestSchemaVersion(): number {
   // Keep this in sync with applyPendingMigrations highest version
-  return 2;
+  return 4;
 }
 
 export function applyPendingMigrations() {
@@ -863,6 +863,41 @@ export function applyPendingMigrations() {
       console.error('Error applying v3 installments original fields migration:', e);
     }
     setSchemaVersion(3);
+  }
+
+  if (currentVersion < 4) {
+    try {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS invoices (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sale_id INTEGER NOT NULL UNIQUE,
+          customer_id INTEGER NOT NULL,
+          invoice_number TEXT NOT NULL UNIQUE,
+          status TEXT CHECK(status IN ('emitted', 'sent', 'paid', 'cancelled')) DEFAULT 'emitted',
+          total_amount REAL NOT NULL,
+          sent_at DATETIME,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE CASCADE,
+          FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE
+        )
+      `);
+      db.exec('CREATE INDEX IF NOT EXISTS idx_invoices_sale_id ON invoices(sale_id)');
+      db.exec('CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)');
+
+      // Ensure missing columns exist
+      const tableInfo = db.prepare("PRAGMA table_info(invoices)").all() as any[];
+      const columns = tableInfo.map(c => c.name);
+      if (!columns.includes('total_amount')) {
+        db.exec('ALTER TABLE invoices ADD COLUMN total_amount REAL DEFAULT 0');
+        db.exec('UPDATE invoices SET total_amount = (SELECT total_amount FROM sales WHERE sales.id = invoices.sale_id)');
+      }
+
+      console.log('Successfully created/updated invoices table');
+    } catch (e) {
+      console.error('Error creating invoices table:', e);
+    }
+    setSchemaVersion(4);
   }
 }
 

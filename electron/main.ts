@@ -15,7 +15,8 @@ import {
   saleItemOperations,
   paymentOperations,
   notificationOperations,
-  calendarOperations
+  calendarOperations,
+  invoiceOperations
 } from '../lib/database-operations';
 import { setupNotificationIpcHandlers } from '../notifications/ipc/handlers';
 import { setupClientNotificationScheduler, checkLowStockAfterSaleHook, checkInstallmentForOverdueSingle } from '../notifications/hooks';
@@ -205,17 +206,21 @@ function createTray() {
 function createWindow() {
 
 
+  // Preload is now a .ts file compiled to .js in the same folder or parent folder
   const preloadCandidates = [
-    path.join(process.cwd(), 'electron', 'preload.js'),
+    path.join(__dirname, 'preload.js'),
     path.join(__dirname, '../preload.js'),
-    path.join(__dirname, '../../preload.js')
+    path.join(app.getAppPath(), 'dist/electron/electron/preload.js'),
+    path.join(app.getAppPath(), 'dist/electron/preload.js'),
   ];
-  let resolvedPreload = preloadCandidates.find(p => {
-    try { return fs.existsSync(p); } catch { return false; }
-  });
+
+  let resolvedPreload = preloadCandidates.find(p => fs.existsSync(p));
+
+  console.log('Resolved Preload Path:', resolvedPreload);
+
   if (!resolvedPreload) {
-    // fallback to cwd path
-    resolvedPreload = path.join(process.cwd(), 'electron', 'preload.js');
+    // Fallback consistent with current structure
+    resolvedPreload = path.join(__dirname, '../preload.js');
   }
 
   mainWindow = new BrowserWindow({
@@ -247,11 +252,9 @@ function createWindow() {
 
 
   if (isDev) {
+    mainWindow.webContents.openDevTools();
     const devUrl = process.env.ELECTRON_DEV_URL || 'http://localhost:3001';
     mainWindow.loadURL(devUrl);
-
-
-    mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(path.join(__dirname, '../../../out/index.html'));
   }
@@ -367,6 +370,8 @@ function setupIpcHandlers() {
   ipcMain.handle('sales:getAll', () => saleOperations.getAll());
   ipcMain.handle('sales:getPaginated', (_, page, pageSize, searchTerm) =>
     saleOperations.getPaginated(page, pageSize, searchTerm));
+  ipcMain.handle('sales:getPageNumber', (_, saleId, pageSize, searchTerm) =>
+    saleOperations.getSalePageNumber(saleId, pageSize, searchTerm));
 
   ipcMain.handle('sales:search', (_, searchTerm, limit) => saleOperations.search(searchTerm, limit));
   ipcMain.handle('sales:getById', (_, id) => saleOperations.getById(id));
@@ -402,6 +407,7 @@ function setupIpcHandlers() {
 
 
   ipcMain.handle('installments:getBySale', (_, saleId) => installmentOperations.getBySale(saleId));
+  ipcMain.handle('installments:getAll', () => installmentOperations.getAll());
   ipcMain.handle('installments:getOverdue', () => installmentOperations.getOverdue());
   ipcMain.handle('installments:getUpcoming', (_, limit) => installmentOperations.getUpcoming(limit));
   ipcMain.handle('installments:create', (_, installment) => installmentOperations.create(installment));
@@ -478,6 +484,25 @@ function setupIpcHandlers() {
     broadcastDatabaseChange('calendar', 'delete', { id });
     return res;
   });
+
+  ipcMain.handle('invoices:create', (_, invoice) => {
+    const res = invoiceOperations.create(invoice);
+    broadcastDatabaseChange('invoices', 'create', { id: res });
+    return res;
+  });
+  ipcMain.handle('invoices:update', (_, id, invoice) => {
+    const res = invoiceOperations.update(id, invoice);
+    broadcastDatabaseChange('invoices', 'update', { id });
+    return res;
+  });
+  ipcMain.handle('invoices:delete', (_, id) => {
+    const res = invoiceOperations.delete(id);
+    broadcastDatabaseChange('invoices', 'delete', { id });
+    return res;
+  });
+  ipcMain.handle('invoices:getBySaleId', (_, saleId) => invoiceOperations.getBySaleId(saleId));
+  ipcMain.handle('invoices:getAllWithDetails', () => invoiceOperations.getAllWithDetails());
+  ipcMain.handle('invoices:getNextInvoiceNumber', () => invoiceOperations.getNextInvoiceNumber());
 
 
 
@@ -779,6 +804,20 @@ function setupIpcHandlers() {
 
 
 
+  ipcMain.handle('utils:getDesktopPath', () => {
+    return app.getPath('desktop');
+  });
+
+  ipcMain.handle('utils:saveFile', async (_, { filePath, buffer }: { filePath: string; buffer: ArrayBuffer }) => {
+    try {
+      fs.writeFileSync(filePath, Buffer.from(buffer) as any);
+      return true;
+    } catch (e) {
+      console.error('Error saving file:', e);
+      return false;
+    }
+  });
+
   ipcMain.handle('db:deleteAll', async () => {
     try {
 
@@ -875,40 +914,32 @@ app.whenReady().then(() => {
 
 
 
-    if (url.includes('index.txt') && url.includes('_rsc=')) {
+    // Handle Next.js RSC (React Server Components) requests (.txt files with _rsc query)
+    if (url.includes('.txt') && url.includes('_rsc=')) {
       console.log('Intercepted RSC request:', url);
-
-
 
       let rscPath = url.replace('file:///', '');
       rscPath = decodeURIComponent(rscPath);
 
-
-
       const [pathOnly] = rscPath.split('?');
-
-
-
-      const relativePath = pathOnly.replace(/^[A-Za-z]:/, '');
-
-
+      // On Windows, the path might be D:/path/to/out/filename.txt
+      // We want to isolate 'filename.txt' or whatever comes after the 'out' directory
+      const pathParts = pathOnly.split('/');
+      const outIndex = pathParts.lastIndexOf('out');
+      const relativePath = outIndex !== -1
+        ? pathParts.slice(outIndex + 1).join(path.sep)
+        : pathOnly.replace(/^[A-Za-z]:/, '').replace(/^\/+/, '').replace(/\//g, path.sep);
 
       const appPath = path.join(__dirname, '../../../', 'out');
       const fullPath = path.join(appPath, relativePath.replace(/\//g, path.sep));
 
       console.log('Mapped RSC path:', fullPath);
 
-
-
       if (fs.existsSync(fullPath)) {
         try {
           const rscContent = fs.readFileSync(fullPath);
           callback({
-            statusCode: 200,
-            headers: {
-              'Content-Type': 'text/plain',
-              'Access-Control-Allow-Origin': '*'
-            },
+            mimeType: 'text/plain',
             data: rscContent
           });
           return;
@@ -917,14 +948,8 @@ app.whenReady().then(() => {
         }
       }
 
-
-
       callback({
-        statusCode: 200,
-        headers: {
-          'Content-Type': 'text/plain',
-          'Access-Control-Allow-Origin': '*'
-        },
+        mimeType: 'text/plain',
         data: Buffer.from('')
       });
       return;
@@ -944,9 +969,19 @@ app.whenReady().then(() => {
 
 
     const rootPathCandidate = filePath.replace(/^[A-Za-z]:/, '');
-    if (rootPathCandidate.startsWith('/_next') || rootPathCandidate.startsWith('/static')) {
-      const assetRelative = rootPathCandidate.replace(/^\//, '');
-      filePath = path.join(__dirname, '../../../', 'out', assetRelative.replace(/\//g, path.sep));
+    const appOutPath = path.join(__dirname, '../../../', 'out');
+
+    // Robust path resolution: try to isolate the part of the path relative to 'out'
+    const pathParts = rootPathCandidate.split(/[\/\\]/);
+    const outIndex = pathParts.lastIndexOf('out');
+    const relativePath = outIndex !== -1
+      ? pathParts.slice(outIndex + 1).join(path.sep)
+      : rootPathCandidate.replace(/^\/+/, '').replace(/\//g, path.sep);
+
+    const candidatePath = path.join(appOutPath, relativePath);
+
+    if (rootPathCandidate.includes('_next') || rootPathCandidate.includes('static') || fs.existsSync(candidatePath)) {
+      filePath = candidatePath;
     }
 
 
@@ -1122,12 +1157,12 @@ app.on('web-contents-created', (event, contents) => {
   });
 });
 
-ipcMain.handle('open-external', async (_event, url: string) => {
+ipcMain.handle('app:openExternal', async (_event, url: string) => {
   try {
     await shell.openExternal(url);
     return true;
   } catch (err) {
-    console.error('open-external failed:', err);
+    console.error('app:openExternal failed:', err);
     return false;
   }
 });

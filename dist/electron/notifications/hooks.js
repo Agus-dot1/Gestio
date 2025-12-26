@@ -4,17 +4,10 @@ exports.checkInstallmentForOverdueSingle = exports.checkLowStockAfterSaleHook = 
 const constants_1 = require("./constants");
 const repository_1 = require("./repository");
 const database_operations_1 = require("../lib/database-operations");
+const locale_1 = require("../config/locale");
 function setupClientNotificationScheduler(getWindow, interval) {
     const intervalMs = typeof interval === 'number' && interval > 0 ? interval : 5 * 60000;
     let lastWeeklyPrecheckKeyEmitted = null;
-    const formatCurrency = (value) => {
-        try {
-            return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', maximumFractionDigits: 0 }).format(value);
-        }
-        catch {
-            return `$ ${value}`;
-        }
-    };
     function cleanupOrphans() {
         try {
             repository_1.notificationOperations.dedupeActiveByMessageKey();
@@ -48,7 +41,7 @@ function setupClientNotificationScheduler(getWindow, interval) {
                         if (!inst?.id || !inst.customer_name || !inst.balance || inst.balance <= 0)
                             continue;
                         const customer = inst.customer_name;
-                        const msg = `Hay una cuota vencida — ${customer} — ${new Date(inst.due_date).toLocaleDateString('es-AR')} — ${formatCurrency(inst.balance)}`;
+                        const msg = `Hay una cuota vencida — ${customer} — ${new Date(inst.due_date).toLocaleDateString('es-AR')} — ${(0, locale_1.formatCurrency)(inst.balance)}`;
                         const key = `overdue|${inst.id}`;
                         const existsActive = repository_1.notificationOperations.existsActiveWithKey(key);
                         const existsToday = repository_1.notificationOperations.existsTodayWithKey(key);
@@ -73,7 +66,7 @@ function setupClientNotificationScheduler(getWindow, interval) {
                         if (!inst?.id || !inst.customer_name || !inst.balance || inst.balance <= 0)
                             continue;
                         const customer = inst.customer_name;
-                        const msg = `Cuota próxima a vencer — ${customer} — ${new Date(inst.due_date).toLocaleDateString('es-AR')} — ${formatCurrency(inst.balance)}`;
+                        const msg = `Cuota próxima a vencer — ${customer} — ${new Date(inst.due_date).toLocaleDateString('es-AR')} — ${(0, locale_1.formatCurrency)(inst.balance)}`;
                         const key = `upcoming|${inst.id}`;
                         const existsActive = repository_1.notificationOperations.existsActiveWithKey(key);
                         const existsToday = repository_1.notificationOperations.existsTodayWithKey(key);
